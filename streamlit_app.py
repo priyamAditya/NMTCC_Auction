@@ -3,33 +3,17 @@ import pandas as pd
 import time
 from io import BytesIO
 
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="NMTCC Auction",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 # ---------------- PREMIUM CSS ----------------
 st.markdown("""
 <style>
-body {
-    background-color: #0B0F1A;
-}
 .main {
     background: linear-gradient(135deg,#0B0F1A,#111827);
-}
-.card {
-    padding:20px;
-    border-radius:20px;
-    background: rgba(255,255,255,0.08);
-    backdrop-filter: blur(12px);
-    box-shadow:0 8px 32px rgba(0,0,0,0.4);
-    margin-bottom:15px;
-}
-.big-font {
-    font-size:28px;
-    font-weight:bold;
-    color:#FFD700;
 }
 .player-card {
     padding:30px;
@@ -39,22 +23,27 @@ body {
     color:white;
     box-shadow:0 10px 30px rgba(0,0,0,0.5);
 }
+.big-font {
+    font-size:28px;
+    font-weight:bold;
+    color:#FFD700;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- SESSION ----------------
+# ---------------- SESSION STATE ----------------
 defaults = {
     "auction_started": False,
     "teams": {},
     "current_player_index": 0,
     "sold_players": [],
-    "bid": 5,
-    "history": []
+    "history": [],
+    "bid": 5
 }
 
-for key, val in defaults.items():
+for key, value in defaults.items():
     if key not in st.session_state:
-        st.session_state[key] = val
+        st.session_state[key] = value
 
 # ---------------- TITLE ----------------
 st.markdown(
@@ -62,53 +51,73 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---------------- SETUP ----------------
+# ---------------- SETUP SCREEN ----------------
 if not st.session_state.auction_started:
 
-    st.markdown("## Auction Setup")
+    st.header("Auction Setup")
 
-    num_teams = st.number_input("Enter Number of Teams", 2, 20)
+    num_teams = st.number_input(
+        "Enter Number of Teams",
+        min_value=2,
+        max_value=20,
+        value=2
+    )
 
     teams = {}
 
     for i in range(num_teams):
 
-        st.markdown(f"### Team {i+1}")
+        st.subheader(f"Team {i+1}")
 
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            name = st.text_input("Team Name", key=f"name{i}")
+            team_name = st.text_input("Team Name", key=f"team_{i}")
 
         with col2:
-            captain = st.text_input("Captain", key=f"captain{i}")
+            captain = st.text_input("Captain", key=f"captain_{i}")
 
         with col3:
-            logo = st.file_uploader("Upload Logo", type=['png','jpg'], key=f"logo{i}")
+            logo = st.file_uploader(
+                "Upload Logo",
+                type=['png', 'jpg'],
+                key=f"logo_{i}"
+            )
 
-        if name:
-            teams[name] = {
+        if team_name:
+            teams[team_name] = {
                 "captain": captain,
                 "logo": logo,
                 "players": [],
                 "purse": 0
             }
 
-    uploaded_file = st.file_uploader("Upload Player Excel", type=['xlsx'])
+    uploaded_file = st.file_uploader(
+        "Upload Player Excel",
+        type=['xlsx']
+    )
 
-    players_per_team = st.number_input("Players Per Team", 1)
+    players_per_team = st.number_input(
+        "Players Per Team",
+        min_value=1,
+        value=11
+    )
 
-    purse = st.number_input("Auction Purse", 10)
+    purse = st.number_input(
+        "Auction Purse",
+        min_value=10,
+        value=100
+    )
 
-  if st.button("🚀 START AUCTION"):
+    if st.button("🚀 START AUCTION"):
 
-    if uploaded_file is None:
-        st.error("Please upload an Excel file.")
+        if uploaded_file is None:
+            st.error("Please upload Excel file.")
+            st.stop()
 
-    else:
         df = pd.read_excel(uploaded_file)
 
-        # Normalize column names
+        # Normalize columns
         df.columns = (
             df.columns
             .str.strip()
@@ -116,14 +125,14 @@ if not st.session_state.auction_started:
             .str.replace(" ", "_")
         )
 
-        st.write("Detected Columns:", df.columns.tolist())
-
         required_columns = ["player_name", "set", "base_price"]
 
-        missing_cols = [col for col in required_columns if col not in df.columns]
+        missing_cols = [
+            col for col in required_columns if col not in df.columns
+        ]
 
         if missing_cols:
-            st.error(f"Missing required columns: {missing_cols}")
+            st.error(f"Missing Columns: {missing_cols}")
             st.stop()
 
         for team in teams:
@@ -133,57 +142,59 @@ if not st.session_state.auction_started:
         st.session_state.players_df = df
         st.session_state.players_per_team = players_per_team
         st.session_state.auction_started = True
+        st.session_state.bid = 5
 
         st.rerun()
 
-# ---------------- AUCTION ----------------
+# ---------------- AUCTION SCREEN ----------------
 else:
 
     df = st.session_state.players_df
 
     selected_set = st.selectbox(
         "Choose Player Set",
-        df["Set"].unique()
+        df["set"].unique()
     )
 
-    filtered = df[df["Set"] == selected_set].reset_index(drop=True)
+    filtered_players = df[df["set"] == selected_set].reset_index(drop=True)
 
-    if st.session_state.current_player_index >= len(filtered):
-        st.success("Set Completed!")
+    if st.session_state.current_player_index >= len(filtered_players):
+        st.success("All Players in this Set Auctioned!")
         st.stop()
 
-    player = filtered.iloc[st.session_state.current_player_index]
+    player = filtered_players.iloc[
+        st.session_state.current_player_index
+    ]
 
     # TIMER
     st.markdown("### ⏳ Auction Timer")
 
     timer_placeholder = st.empty()
 
-    for i in range(10,0,-1):
+    for i in range(5, 0, -1):
         timer_placeholder.markdown(f"## {i} sec")
         time.sleep(0.1)
 
     # PLAYER CARD
     st.markdown(f"""
     <div class='player-card'>
-        <h2>{player['Player Name']}</h2>
-        <h4>Set: {player['Set']}</h4>
-        <h3>Base Price: ₹{player['Base Price']}</h3>
+        <h2>{player['player_name']}</h2>
+        <h4>Set: {player['set']}</h4>
+        <h3>Base Price: ₹{player['base_price']}</h3>
     </div>
     """, unsafe_allow_html=True)
 
-    st.divider()
+    # BID DISPLAY
+    st.markdown(
+        f"<div class='big-font'>Current Bid: ₹{st.session_state.bid}</div>",
+        unsafe_allow_html=True
+    )
 
-    # BID LOGIC
-    bid = st.session_state.bid
-
-    st.markdown(f"<div class='big-font'>Current Bid: ₹{bid}</div>", unsafe_allow_html=True)
-
-    col1,col2,col3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         if st.button("➕ Increase Bid"):
-            if bid < 15:
+            if st.session_state.bid < 15:
                 st.session_state.bid += 2
             else:
                 st.session_state.bid += 5
@@ -191,8 +202,8 @@ else:
 
     with col2:
         if st.button("➖ Decrease Bid"):
-            if bid > 5:
-                if bid <= 15:
+            if st.session_state.bid > 5:
+                if st.session_state.bid <= 15:
                     st.session_state.bid -= 2
                 else:
                     st.session_state.bid -= 5
@@ -200,12 +211,15 @@ else:
 
     with col3:
         if st.button("🔄 Reset Bid"):
-            st.session_state.bid = player["Base Price"]
+            st.session_state.bid = int(player["base_price"])
             st.rerun()
 
-    winning_team = st.selectbox("Winning Team", list(st.session_state.teams.keys()))
+    winning_team = st.selectbox(
+        "Winning Team",
+        list(st.session_state.teams.keys())
+    )
 
-    col4,col5,col6 = st.columns(3)
+    col4, col5, col6 = st.columns(3)
 
     # SELL PLAYER
     with col4:
@@ -213,13 +227,15 @@ else:
 
             team = st.session_state.teams[winning_team]
 
-            if team["purse"] >= st.session_state.bid:
+            if team["purse"] < st.session_state.bid:
+                st.error("Insufficient Purse")
 
-                team["players"].append(player["Player Name"])
+            else:
+                team["players"].append(player["player_name"])
                 team["purse"] -= st.session_state.bid
 
                 sale = {
-                    "Player": player["Player Name"],
+                    "Player": player["player_name"],
                     "Team": winning_team,
                     "Price": st.session_state.bid
                 }
@@ -227,17 +243,13 @@ else:
                 st.session_state.sold_players.append(sale)
                 st.session_state.history.append(sale)
 
-                st.success("🔨 SOLD!")
-
-                st.balloons()
-
                 st.session_state.current_player_index += 1
                 st.session_state.bid = 5
 
-                st.rerun()
+                st.success("🔨 SOLD!")
+                st.balloons()
 
-            else:
-                st.error("Insufficient Purse")
+                st.rerun()
 
     # UNSOLD
     with col5:
@@ -253,7 +265,10 @@ else:
 
                 last = st.session_state.history.pop()
 
-                st.session_state.teams[last["Team"]]["players"].remove(last["Player"])
+                st.session_state.teams[last["Team"]]["players"].remove(
+                    last["Player"]
+                )
+
                 st.session_state.teams[last["Team"]]["purse"] += last["Price"]
 
                 st.session_state.sold_players.pop()
@@ -276,61 +291,57 @@ else:
         Squad: {len(details['players'])}/{st.session_state.players_per_team}
         """)
 
-    # SOLD PLAYERS
+    # SOLD PLAYERS TABLE
     st.divider()
-
-    st.markdown("## Auction Results")
+    st.header("Sold Players")
 
     sold_df = pd.DataFrame(st.session_state.sold_players)
 
     st.dataframe(sold_df)
 
-    # EXPORT EXCEL
+    # DOWNLOAD SOLD PLAYERS
     def convert_df(df):
         output = BytesIO()
+
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer,index=False)
+            df.to_excel(writer, index=False)
+
         return output.getvalue()
 
-    excel = convert_df(sold_df)
-
     st.download_button(
-        "📥 Download Results Excel",
-        excel,
+        "📥 Download Auction Results",
+        convert_df(sold_df),
         "auction_results.xlsx"
     )
+
+    # DOWNLOAD POST AUCTION TEAMS
     st.divider()
-st.markdown("## 📋 Post Auction Team Sheets")
+    st.header("Post Auction Team Sheets")
 
-team_data = []
+    def generate_team_excel():
 
-for team, details in st.session_state.teams.items():
+        output = BytesIO()
 
-    for player in details["players"]:
-        team_data.append({
-            "Team Name": team,
-            "Captain": details["captain"],
-            "Player": player,
-            "Remaining Purse": details["purse"]
-        })
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
 
-team_df = pd.DataFrame(team_data)
+            for team, details in st.session_state.teams.items():
 
+                team_df = pd.DataFrame({
+                    "Captain": [details["captain"]] * len(details["players"]),
+                    "Players": details["players"],
+                    "Remaining Purse": [details["purse"]] * len(details["players"])
+                })
 
-def convert_team_df(df):
-    output = BytesIO()
+                team_df.to_excel(
+                    writer,
+                    sheet_name=team[:31],
+                    index=False
+                )
 
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name="Post Auction Teams")
+        return output.getvalue()
 
-    return output.getvalue()
-
-
-team_excel = convert_team_df(team_df)
-
-st.download_button(
-    label="📥 Download Post Auction Teams",
-    data=team_excel,
-    file_name="post_auction_teams.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+    st.download_button(
+        "📥 Download Post Auction Teams",
+        generate_team_excel(),
+        "NMTCC_Post_Auction_Teams.xlsx"
+    )
