@@ -100,9 +100,31 @@ if not st.session_state.auction_started:
 
     purse = st.number_input("Auction Purse", 10)
 
-    if st.button("🚀 START AUCTION"):
+  if st.button("🚀 START AUCTION"):
 
+    if uploaded_file is None:
+        st.error("Please upload an Excel file.")
+
+    else:
         df = pd.read_excel(uploaded_file)
+
+        # Normalize column names
+        df.columns = (
+            df.columns
+            .str.strip()
+            .str.lower()
+            .str.replace(" ", "_")
+        )
+
+        st.write("Detected Columns:", df.columns.tolist())
+
+        required_columns = ["player_name", "set", "base_price"]
+
+        missing_cols = [col for col in required_columns if col not in df.columns]
+
+        if missing_cols:
+            st.error(f"Missing required columns: {missing_cols}")
+            st.stop()
 
         for team in teams:
             teams[team]["purse"] = purse
