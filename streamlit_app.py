@@ -1,40 +1,39 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import pickle
+import os
 
-# ---------------- PAGE CONFIG ----------------
+# ---------------- CONFIG ----------------
+SAVE_FILE = "auction_state.pkl"
+
 st.set_page_config(page_title="NMTCC Auction", layout="wide")
 
-# ---------------- CSS ----------------
-st.markdown("""
-<style>
-.player-card {
-    padding:30px;
-    border-radius:20px;
-    background: linear-gradient(135deg,#1E293B,#334155);
-    text-align:center;
-    color:white;
-    margin-bottom:20px;
-}
-.big-font {
-    font-size:28px;
-    font-weight:bold;
-    color:#FFD700;
-}
-.team-card {
-    padding:15px;
-    border-radius:15px;
-    background:#1e293b;
-    color:white;
-    margin-bottom:10px;
-}
-</style>
-""", unsafe_allow_html=True)
+
+# ---------------- SAVE / LOAD FUNCTIONS ----------------
+def save_state():
+    with open(SAVE_FILE, "wb") as f:
+        pickle.dump(dict(st.session_state), f)
+
+
+def load_state():
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, "rb") as f:
+            saved_data = pickle.load(f)
+
+        for key, value in saved_data.items():
+            st.session_state[key] = value
+
+
+# LOAD PREVIOUS SESSION ON START
+if "loaded" not in st.session_state:
+    load_state()
+    st.session_state.loaded = True
+
 
 # ---------------- DEFAULTS ----------------
 defaults = {
     "page": "setup",
-    "auction_started": False,
     "teams": {},
     "players_df": None,
     "players_per_team": 11,
@@ -42,7 +41,6 @@ defaults = {
     "current_player_index": {},
     "sold_players": [],
     "unsold_players": [],
-    "history": [],
     "unsold_round": False
 }
 
@@ -50,24 +48,21 @@ for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
+
 # ---------------- TITLE ----------------
-st.markdown("<h1 style='text-align:center;color:#FFD700;'>🏏 NMTCC AUCTION</h1>", unsafe_allow_html=True)
+st.title("🏏 NMTCC Auction")
 
 
-# ============================================================
+# =====================================================
 # SETUP PAGE
-# ============================================================
+# =====================================================
 if st.session_state.page == "setup":
-
-    st.header("Auction Setup")
 
     num_teams = st.number_input("Number of Teams", 2, 20, 2)
 
     teams = {}
 
     for i in range(num_teams):
-
-        st.subheader(f"Team {i+1}")
 
         col1, col2 = st.columns(2)
 
@@ -90,26 +85,15 @@ if st.session_state.page == "setup":
 
     purse = st.number_input("Auction Purse", 10, 1000, 100)
 
-    if st.button("🚀 Start Auction"):
-
-        if uploaded_file is None:
-            st.error("Upload Excel File")
-            st.stop()
+    if st.button("Start Auction"):
 
         df = pd.read_excel(uploaded_file)
 
         df.columns = (
-            df.columns
-            .str.strip()
+            df.columns.str.strip()
             .str.lower()
             .str.replace(" ", "_")
         )
-
-        required_cols = ["player_name", "set", "base_price"]
-
-        if not all(col in df.columns for col in required_cols):
-            st.error("Excel must contain: player_name, set, base_price")
-            st.stop()
 
         for team in teams:
             teams[team]["purse"] = purse
@@ -122,24 +106,18 @@ if st.session_state.page == "setup":
         }
 
         st.session_state.page = "auction"
+
+        save_state()
         st.rerun()
 
 
-# ============================================================
+# =====================================================
 # AUCTION PAGE
-# ============================================================
+# =====================================================
 elif st.session_state.page == "auction":
 
     df = st.session_state.players_df
 
-    # BACK BUTTON
-    if st.button("⬅ Back to Setup"):
-        st.session_state.page = "setup"
-        st.rerun()
-
-    st.divider()
-
-    # AVAILABLE SETS
     available_sets = []
 
     for set_name in df["set"].unique():
@@ -149,29 +127,17 @@ elif st.session_state.page == "auction":
         if st.session_state.current_player_index[set_name] < len(filtered):
             available_sets.append(set_name)
 
-    # UNSOLD ROUND
-    if not available_sets and st.session_state.unsold_players and not st.session_state.unsold_round:
-
+    if not available_sets and st.session_state.unsold_players:
         st.session_state.unsold_round = True
 
-    # MAIN AUCTION COMPLETE
-    if not available_sets and not st.session_state.unsold_round:
-
+    if not available_sets and not st.session_state.unsold_players:
         st.session_state.page = "summary"
+        save_state()
         st.rerun()
 
-    # UNSOLD ROUND LOGIC
     if st.session_state.unsold_round:
 
-        st.header("🔁 Unsold Players Round")
-
-        unsold_df = pd.DataFrame(st.session_state.unsold_players)
-
-        if unsold_df.empty:
-            st.session_state.page = "summary"
-            st.rerun()
-
-        player = unsold_df.iloc[0]
+        player = pd.DataFrame(st.session_state.unsold_players).iloc[0]
 
     else:
 
@@ -179,151 +145,105 @@ elif st.session_state.page == "auction":
 
         filtered_players = df[df["set"] == selected_set].reset_index(drop=True)
 
-        current_index = st.session_state.current_player_index[selected_set]
+        idx = st.session_state.current_player_index[selected_set]
 
-        player = filtered_players.iloc[current_index]
+        player = filtered_players.iloc[idx]
 
-    # PLAYER CARD
-    st.markdown(f"""
-    <div class='player-card'>
-        <h2>{player['player_name']}</h2>
-        <h4>Set: {player['set']}</h4>
-        <h3>Base Price: ₹{player['base_price']}</h3>
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader(player["player_name"])
+    st.write("Base Price:", player["base_price"])
 
-    # BID
-    st.markdown(f"<div class='big-font'>Current Bid: ₹{st.session_state.bid}</div>", unsafe_allow_html=True)
+    st.write("Current Bid:", st.session_state.bid)
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        if st.button("➕ Increase Bid"):
-            st.session_state.bid += 2 if st.session_state.bid < 15 else 5
-            st.rerun()
-
-    with col2:
-        if st.button("➖ Decrease Bid"):
-            if st.session_state.bid > 5:
-                st.session_state.bid -= 2 if st.session_state.bid <= 15 else 5
-            st.rerun()
-
-    with col3:
-        if st.button("🔄 Reset Bid"):
-            st.session_state.bid = int(player["base_price"])
-            st.rerun()
+    if st.button("Increase Bid"):
+        st.session_state.bid += 2 if st.session_state.bid < 15 else 5
+        save_state()
+        st.rerun()
 
     winning_team = st.selectbox("Winning Team", list(st.session_state.teams.keys()))
 
-    col4, col5, col6 = st.columns(3)
+    if st.button("Sell"):
 
-    # SELL
-    with col4:
-        if st.button("🔨 Sell Player"):
+        st.session_state.teams[winning_team]["players"].append(player["player_name"])
+        st.session_state.teams[winning_team]["purse"] -= st.session_state.bid
 
-            team = st.session_state.teams[winning_team]
+        if st.session_state.unsold_round:
+            st.session_state.unsold_players.pop(0)
+        else:
+            st.session_state.current_player_index[selected_set] += 1
 
-            if team["purse"] < st.session_state.bid:
-                st.error("Insufficient Purse")
+        st.session_state.bid = 5
 
-            else:
-                team["players"].append(player["player_name"])
-                team["purse"] -= st.session_state.bid
-
-                st.session_state.sold_players.append({
-                    "Player": player["player_name"],
-                    "Team": winning_team,
-                    "Price": st.session_state.bid
-                })
-
-                if st.session_state.unsold_round:
-                    st.session_state.unsold_players.pop(0)
-                else:
-                    st.session_state.current_player_index[selected_set] += 1
-
-                st.session_state.bid = 5
-
-                st.rerun()
-
-    # UNSOLD
-    with col5:
-        if st.button("❌ Unsold"):
-
-            if st.session_state.unsold_round:
-                st.session_state.unsold_players.pop(0)
-
-            else:
-                st.session_state.unsold_players.append(player.to_dict())
-                st.session_state.current_player_index[selected_set] += 1
-
-            st.rerun()
-
-    # UNDO
-    with col6:
-        if st.button("↩ Undo"):
-
-            if st.session_state.sold_players:
-
-                last = st.session_state.sold_players.pop()
-
-                st.session_state.teams[last["Team"]]["players"].remove(last["Player"])
-                st.session_state.teams[last["Team"]]["purse"] += last["Price"]
-
-                st.rerun()
-
-    # TEAM TABLES
-    st.divider()
-
-    st.header("🏆 Team Squads")
-
-    cols = st.columns(len(st.session_state.teams))
-
-    for idx, (team, details) in enumerate(st.session_state.teams.items()):
-
-        with cols[idx]:
-
-            st.markdown(f"### {team}")
-
-            st.write(f"Captain: {details['captain']}")
-            st.write(f"Purse Left: ₹{details['purse']}")
-
-            team_df = pd.DataFrame({
-                "Players": details["players"]
-            })
-
-            st.dataframe(team_df)
-
-
-# ============================================================
-# SUMMARY PAGE
-# ============================================================
-elif st.session_state.page == "summary":
-
-    st.success("🎉 Auction Completed!")
-
-    if st.button("⬅ Return to Auction"):
-        st.session_state.page = "auction"
+        save_state()
         st.rerun()
 
-    sold_df = pd.DataFrame(st.session_state.sold_players)
+    if st.button("Unsold"):
 
-    st.dataframe(sold_df)
+        if not st.session_state.unsold_round:
+            st.session_state.unsold_players.append(player.to_dict())
+            st.session_state.current_player_index[selected_set] += 1
+        else:
+            st.session_state.unsold_players.pop(0)
 
-    def convert_df(df):
+        save_state()
+        st.rerun()
+
+
+# =====================================================
+# SUMMARY PAGE
+# =====================================================
+elif st.session_state.page == "summary":
+
+    st.success("Auction Completed!")
+
+    # ---------------- TEAM WISE TABLES ----------------
+    for team, details in st.session_state.teams.items():
+
+        st.subheader(team)
+
+        team_df = pd.DataFrame({
+            "Captain": [details["captain"]] * len(details["players"]),
+            "Players Bought": details["players"],
+            "Remaining Purse": [details["purse"]] * len(details["players"])
+        })
+
+        st.dataframe(team_df)
+
+    # ---------------- MULTI SHEET EXCEL ----------------
+    def generate_excel():
+
         output = BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False)
+
+            for team, details in st.session_state.teams.items():
+
+                team_df = pd.DataFrame({
+                    "Captain": [details["captain"]] * len(details["players"]),
+                    "Players Bought": details["players"],
+                    "Remaining Purse": [details["purse"]] * len(details["players"])
+                })
+
+                team_df.to_excel(
+                    writer,
+                    sheet_name=team[:31],
+                    index=False
+                )
 
         return output.getvalue()
 
     st.download_button(
-        "📥 Download Auction Results",
-        convert_df(sold_df),
-        "auction_results.xlsx"
+        "📥 Download Team Wise Auction Results",
+        generate_excel(),
+        "Team_Wise_Auction_Results.xlsx"
     )
 
-    if st.button("🔄 Restart Auction"):
+    # ---------------- RESET ----------------
+    if st.button("Restart Auction"):
+
+        if os.path.exists(SAVE_FILE):
+            os.remove(SAVE_FILE)
+
         for key in list(st.session_state.keys()):
             del st.session_state[key]
+
         st.rerun()
