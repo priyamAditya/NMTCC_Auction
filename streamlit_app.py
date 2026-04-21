@@ -5,7 +5,7 @@ from io import BytesIO
 
 st.set_page_config(page_title="NMTCC Auction", layout="wide")
 
-# ---------------- DEFAULT STATE ----------------
+# ---------------- STATE ----------------
 defaults = {
     "page": "home",
     "teams": {},
@@ -22,8 +22,6 @@ defaults = {
     "rtm_count": 0,
     "rtm_remaining": {},
     "current_bid_team": None,
-
-    # RTM FLOW
     "rtm_stage": None,
     "rtm_player": None,
     "rtm_price": 0,
@@ -137,7 +135,7 @@ elif st.session_state.page == "rtm":
 # =========================================================
 elif st.session_state.page == "auction":
 
-    # RTM DISPLAY (CARDS)
+    # RTM DISPLAY
     if st.session_state.rtm_enabled:
         st.subheader("RTM Remaining")
         cols = st.columns(len(st.session_state.rtm_remaining))
@@ -181,11 +179,15 @@ elif st.session_state.page == "auction":
         st.session_state.current_bid_team = bid_team
         st.rerun()
 
-    # SELL
+    # ================= SELL =================
     if st.button("Sell Player"):
 
         final_team = st.session_state.current_bid_team
         price = st.session_state.bid
+
+        if st.session_state.teams[final_team]["purse"] < price:
+            st.error(f"{final_team} does not have enough purse!")
+            st.stop()
 
         if st.session_state.rtm_enabled and last_team != "NA":
             if st.session_state.rtm_remaining[last_team] > 0:
@@ -203,6 +205,7 @@ elif st.session_state.page == "auction":
             "sold": price
         })
         st.session_state.teams[final_team]["purse"] -= price
+
         st.session_state.set_index[current_set] += 1
         st.session_state.bid = 5
         st.rerun()
@@ -235,11 +238,7 @@ elif st.session_state.page == "auction":
 
     elif st.session_state.rtm_stage == "counter":
 
-        new_price = st.number_input(
-            "Enter RTM Price",
-            min_value=st.session_state.rtm_price,
-            value=st.session_state.rtm_price
-        )
+        new_price = st.number_input("Enter RTM Price", min_value=st.session_state.rtm_price)
 
         if st.button("Submit Price"):
             st.session_state.rtm_counter_price = new_price
@@ -248,19 +247,20 @@ elif st.session_state.page == "auction":
 
     elif st.session_state.rtm_stage == "decision":
 
-        st.warning(f"{st.session_state.rtm_new_team}, accept ₹{st.session_state.rtm_counter_price}?")
-
         if st.button("Accept"):
-            new_team = st.session_state.rtm_new_team
-            player = st.session_state.rtm_player
+            team = st.session_state.rtm_new_team
             price = st.session_state.rtm_counter_price
 
-            st.session_state.teams[new_team]["players"].append({
-                "player": player["player_name"],
-                "base": player["base_price"],
+            if st.session_state.teams[team]["purse"] < price:
+                st.error(f"{team} does not have enough purse!")
+                st.stop()
+
+            st.session_state.teams[team]["players"].append({
+                "player": st.session_state.rtm_player["player_name"],
+                "base": st.session_state.rtm_player["base_price"],
                 "sold": price
             })
-            st.session_state.teams[new_team]["purse"] -= price
+            st.session_state.teams[team]["purse"] -= price
 
             st.session_state.rtm_stage = None
             st.session_state.set_index[current_set] += 1
@@ -268,17 +268,20 @@ elif st.session_state.page == "auction":
             st.rerun()
 
         if st.button("Reject"):
-            old_team = st.session_state.rtm_old_team
-            player = st.session_state.rtm_player
+            team = st.session_state.rtm_old_team
             price = st.session_state.rtm_counter_price
 
-            st.session_state.teams[old_team]["players"].append({
-                "player": player["player_name"],
-                "base": player["base_price"],
+            if st.session_state.teams[team]["purse"] < price:
+                st.error(f"{team} does not have enough purse!")
+                st.stop()
+
+            st.session_state.teams[team]["players"].append({
+                "player": st.session_state.rtm_player["player_name"],
+                "base": st.session_state.rtm_player["base_price"],
                 "sold": price
             })
-            st.session_state.teams[old_team]["purse"] -= price
-            st.session_state.rtm_remaining[old_team] -= 1
+            st.session_state.teams[team]["purse"] -= price
+            st.session_state.rtm_remaining[team] -= 1
 
             st.session_state.rtm_stage = None
             st.session_state.set_index[current_set] += 1
