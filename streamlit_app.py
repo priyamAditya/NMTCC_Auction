@@ -1,332 +1,264 @@
 import streamlit as st
 import pandas as pd
+import random
 from io import BytesIO
-import pickle
-import os
-
-# ---------------- CONFIG ----------------
-SAVE_FILE = "auction_state.pkl"
 
 st.set_page_config(page_title="NMTCC Auction", layout="wide")
 
-
-# ---------------- SAVE / LOAD ----------------
-def save_state():
-    with open(SAVE_FILE, "wb") as f:
-        pickle.dump(dict(st.session_state), f)
-
-
-def load_state():
-    if os.path.exists(SAVE_FILE):
-        with open(SAVE_FILE, "rb") as f:
-            data = pickle.load(f)
-            for key, value in data.items():
-                st.session_state[key] = value
-
-
-if "loaded" not in st.session_state:
-    load_state()
-    st.session_state.loaded = True
-
-
-# ---------------- DEFAULTS ----------------
+# ---------------- DEFAULT STATE ----------------
 defaults = {
     "page": "home",
     "teams": {},
     "players_df": None,
     "players_per_team": 11,
+    "purse": 100,
     "bid": 5,
-    "current_player_index": {},
-    "sold_players": [],
-    "unsold_players": [],
-    "unsold_round": False
+    "current_set": None,
+    "set_players": {},
+    "set_index": {},
+    "unsold": [],
+    "rtm_enabled": False,
+    "rtm_count": 0,
+    "rtm_remaining": {},
+    "current_player": None,
+    "current_bid_team": None,
+    "trade_mode": False
 }
 
-for key, val in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-
-# ==========================================================
-# HOME PAGE
-# ==========================================================
+# =========================================================
+# HOME
+# =========================================================
 if st.session_state.page == "home":
 
-    st.markdown(
-        "<h1 style='text-align:center;'>🏏 NMTCC AUCTION</h1>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<h1 style='text-align:center;'>🏏 NMTCC AUCTION</h1>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align:center;'>Flamingo Cup Season 1 - Part 2</h3>", unsafe_allow_html=True)
 
-    if st.button("START AUCTION"):
+    if st.button("🚀 Start Auction"):
         st.session_state.page = "setup"
-        save_state()
         st.rerun()
 
-
-# ==========================================================
-# SETUP PAGE
-# ==========================================================
+# =========================================================
+# SETUP
+# =========================================================
 elif st.session_state.page == "setup":
 
     st.title("Auction Setup")
 
-    if st.button("⬅ Back"):
-        st.session_state.page = "home"
-        save_state()
-        st.rerun()
-
-    num_teams = st.number_input("Number of Teams", 2, 20, 2)
+    num_teams = st.number_input("Number of Teams", 2, 10, 2)
 
     teams = {}
 
     for i in range(num_teams):
-
         col1, col2 = st.columns(2)
+        name = col1.text_input("Team Name", key=f"name{i}")
+        cap = col2.text_input("Captain", key=f"cap{i}")
 
-        with col1:
-            team_name = st.text_input("Team Name", key=f"team_{i}")
+        if name:
+            teams[name] = {"captain": cap, "players": [], "purse": 0}
 
-        with col2:
-            captain = st.text_input("Captain", key=f"captain_{i}")
+    uploaded = st.file_uploader("Upload Excel", type=["xlsx"])
 
-        if team_name:
-            teams[team_name] = {
-                "captain": captain,
-                "players": [],
-                "purse": 100
-            }
+    players_per_team = st.number_input("Players per Team", 1, 20, 11)
+    purse = st.number_input("Auction Purse", 10, 500, 100)
 
-    uploaded_file = st.file_uploader("Upload Player Excel", type=["xlsx"])
+    rtm = st.radio("RTM Option?", ["No", "Yes"])
 
-    players_per_team = st.number_input("Players Per Team", 1, 30, 11)
+    if st.button("Next"):
 
-    purse = st.number_input("Auction Purse", 10, 1000, 100)
-
-    if st.button("Proceed to Auction"):
-
-        df = pd.read_excel(uploaded_file)
-
-        df.columns = (
-            df.columns.str.strip()
-            .str.lower()
-            .str.replace(" ", "_")
-        )
-
-        for team in teams:
-            teams[team]["purse"] = purse
+        df = pd.read_excel(uploaded)
+        df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
 
         st.session_state.teams = teams
         st.session_state.players_df = df
         st.session_state.players_per_team = players_per_team
+        st.session_state.purse = purse
 
-        st.session_state.current_player_index = {
-            set_name: 0 for set_name in df["set"].unique()
-        }
+        for t in teams:
+            teams[t]["purse"] = purse
 
-        st.session_state.page = "auction"
+        # RANDOMIZE SET-WISE
+        sets = df["set"].unique()
 
-        save_state()
+        for s in sets:
+            players = df[df["set"] == s].to_dict("records")
+            random.shuffle(players)
+            st.session_state.set_players[s] = players
+            st.session_state.set_index[s] = 0
+
+        if rtm == "Yes":
+            st.session_state.page = "rtm"
+            st.session_state.rtm_enabled = True
+        else:
+            st.session_state.page = "auction"
+
         st.rerun()
 
+# =========================================================
+# RTM CONFIG
+# =========================================================
+elif st.session_state.page == "rtm":
 
-# ==========================================================
-# LIVE AUCTION
-# ==========================================================
+    st.title("RTM Setup")
+
+    count = st.number_input("RTMs per Team", 0, 5, 2)
+
+    if st.button("Proceed"):
+        st.session_state.rtm_count = count
+        st.session_state.rtm_remaining = {
+            t: count for t in st.session_state.teams
+        }
+        st.session_state.page = "auction"
+        st.rerun()
+
+# =========================================================
+# AUCTION
+# =========================================================
 elif st.session_state.page == "auction":
 
     df = st.session_state.players_df
 
-    available_sets = []
+    # FIND NEXT PLAYER
+    for s in st.session_state.set_players:
 
-    for set_name in df["set"].unique():
-
-        filtered = df[df["set"] == set_name]
-
-        if st.session_state.current_player_index[set_name] < len(filtered):
-            available_sets.append(set_name)
-
-    if not available_sets and st.session_state.unsold_players:
-        st.session_state.unsold_round = True
-
-    if not available_sets and not st.session_state.unsold_players:
-        st.session_state.page = "summary"
-        save_state()
+        idx = st.session_state.set_index[s]
+        if idx < len(st.session_state.set_players[s]):
+            player = st.session_state.set_players[s][idx]
+            current_set = s
+            break
+    else:
+        st.session_state.page = "trade"
         st.rerun()
 
-    # PLAYER PICKING
-    if st.session_state.unsold_round:
-
-        st.subheader("🔁 UNSOLD ROUND")
-
-        player = pd.DataFrame(st.session_state.unsold_players).iloc[0]
-
-    else:
-
-        selected_set = st.selectbox("Choose Set", available_sets)
-
-        filtered_players = df[df["set"] == selected_set].reset_index(drop=True)
-
-        idx = st.session_state.current_player_index[selected_set]
-
-        player = filtered_players.iloc[idx]
-
     st.subheader(player["player_name"])
-
     st.write("Base Price:", player["base_price"])
+
+    # LAST TEAM (RTM)
+    last_team = "NA"
+    if st.session_state.rtm_enabled:
+        last_team = st.selectbox("Previous Team", ["NA"] + list(st.session_state.teams.keys()))
 
     st.write("Current Bid:", st.session_state.bid)
 
-    col1, col2 = st.columns(2)
+    bid_team = st.selectbox("Current Bidding Team", list(st.session_state.teams.keys()))
 
-    with col1:
-        if st.button("Increase Bid"):
-            st.session_state.bid += 2 if st.session_state.bid < 15 else 5
-            save_state()
-            st.rerun()
-
-    with col2:
-        if st.button("Reset Bid"):
-            st.session_state.bid = int(player["base_price"])
-            save_state()
-            st.rerun()
-
-    winning_team = st.selectbox("Winning Team", list(st.session_state.teams.keys()))
-
-    # SELL
-    if st.button("SELL PLAYER"):
-
-        team = st.session_state.teams[winning_team]
-
-        if len(team["players"]) >= st.session_state.players_per_team:
-            st.error("Team has reached max player limit!")
-
-        elif team["purse"] < st.session_state.bid:
-            st.error("Insufficient Purse!")
-
-        else:
-
-            team["players"].append({
-                "player_name": player["player_name"],
-                "base_price": player["base_price"],
-                "sold_price": st.session_state.bid
-            })
-
-            team["purse"] -= st.session_state.bid
-
-            if st.session_state.unsold_round:
-                st.session_state.unsold_players.pop(0)
-            else:
-                st.session_state.current_player_index[selected_set] += 1
-
-            st.session_state.bid = 5
-
-            save_state()
-            st.rerun()
-
-    # UNSOLD
-    if st.button("UNSOLD"):
-
-        if not st.session_state.unsold_round:
-            st.session_state.unsold_players.append(player.to_dict())
-            st.session_state.current_player_index[selected_set] += 1
-        else:
-            st.session_state.unsold_players.pop(0)
-
-        save_state()
+    if st.button("Increase Bid"):
+        st.session_state.bid += 2 if st.session_state.bid < 15 else 5
+        st.session_state.current_bid_team = bid_team
         st.rerun()
 
-    st.divider()
+    # SELL
+    if st.button("Sell Player"):
+
+        final_team = st.session_state.current_bid_team
+        price = st.session_state.bid
+
+        # RTM LOGIC
+        if st.session_state.rtm_enabled and last_team != "NA":
+
+            if st.session_state.rtm_remaining[last_team] > 0:
+
+                use_rtm = st.radio("Use RTM?", ["No", "Yes"])
+
+                if use_rtm == "Yes":
+                    st.session_state.rtm_remaining[last_team] -= 1
+                    final_team = last_team
+
+        st.session_state.teams[final_team]["players"].append({
+            "player": player["player_name"],
+            "base": player["base_price"],
+            "sold": price
+        })
+
+        st.session_state.teams[final_team]["purse"] -= price
+
+        st.session_state.set_index[current_set] += 1
+        st.session_state.bid = 5
+
+        st.rerun()
+
+    if st.button("Unsold"):
+        st.session_state.unsold.append(player)
+        st.session_state.set_index[current_set] += 1
+        st.rerun()
 
     # LIVE TEAM TABLES
-    st.header("🏆 Live Team Squads")
+    st.divider()
 
     cols = st.columns(len(st.session_state.teams))
 
-    for idx, (team, details) in enumerate(st.session_state.teams.items()):
-
-        with cols[idx]:
-
+    for i, (team, data) in enumerate(st.session_state.teams.items()):
+        with cols[i]:
             st.subheader(team)
+            st.write("Purse:", data["purse"])
+            st.dataframe(pd.DataFrame(data["players"]))
 
-            st.write("Captain:", details["captain"])
-            st.write("Purse:", details["purse"])
+# =========================================================
+# TRADE WINDOW
+# =========================================================
+elif st.session_state.page == "trade":
 
-            if details["players"]:
-                team_df = pd.DataFrame(details["players"])
-                st.dataframe(team_df)
-            else:
-                st.write("No Players Bought Yet")
+    st.title("Trade Window")
 
-    # UNSOLD TABLE
-    st.divider()
+    teams = list(st.session_state.teams.keys())
 
-    st.header("❌ Unsold Players")
+    t1 = st.selectbox("Team 1", teams)
+    t2 = st.selectbox("Team 2", teams)
 
-    if st.session_state.unsold_players:
+    p1 = st.selectbox("Player Team 1", [p["player"] for p in st.session_state.teams[t1]["players"]])
+    p2 = st.selectbox("Player Team 2", [p["player"] for p in st.session_state.teams[t2]["players"]])
 
-        unsold_df = pd.DataFrame(st.session_state.unsold_players)
+    if st.button("Execute Trade"):
 
-        st.dataframe(
-            unsold_df[["player_name", "base_price"]]
-        )
+        team1 = st.session_state.teams[t1]["players"]
+        team2 = st.session_state.teams[t2]["players"]
 
-    else:
-        st.write("No Unsold Players Yet")
+        player1 = next(p for p in team1 if p["player"] == p1)
+        player2 = next(p for p in team2 if p["player"] == p2)
 
+        team1.remove(player1)
+        team2.remove(player2)
 
-# ==========================================================
-# SUMMARY PAGE
-# ==========================================================
+        team1.append(player2)
+        team2.append(player1)
+
+        st.success("Trade Completed")
+
+    if st.button("Finish Trade"):
+        st.session_state.page = "summary"
+        st.rerun()
+
+# =========================================================
+# SUMMARY
+# =========================================================
 elif st.session_state.page == "summary":
 
     st.title("Auction Summary")
 
-    for team, details in st.session_state.teams.items():
+    for team, data in st.session_state.teams.items():
 
         st.subheader(team)
+        st.write("Remaining Purse:", data["purse"])
 
-        st.write("Captain:", details["captain"])
-        st.write("Remaining Purse:", details["purse"])
+        df = pd.DataFrame(data["players"])
+        st.dataframe(df)
 
-        if details["players"]:
-
-            summary_df = pd.DataFrame(details["players"])
-
-            st.dataframe(summary_df)
-
-    # EXCEL EXPORT
-    def generate_excel():
+    def export():
 
         output = BytesIO()
 
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-
-            for team, details in st.session_state.teams.items():
-
-                if details["players"]:
-
-                    team_df = pd.DataFrame(details["players"])
-
-                    team_df.to_excel(
-                        writer,
-                        sheet_name=team[:31],
-                        index=False
-                    )
+        with pd.ExcelWriter(output) as writer:
+            for team, data in st.session_state.teams.items():
+                pd.DataFrame(data["players"]).to_excel(writer, sheet_name=team[:30])
 
         return output.getvalue()
 
-    st.download_button(
-        "Download Team Wise Results",
-        generate_excel(),
-        "Team_Wise_Auction.xlsx"
-    )
+    st.download_button("Download Results", export(), "auction.xlsx")
 
-    if st.button("Restart Auction"):
-
-        if os.path.exists(SAVE_FILE):
-            os.remove(SAVE_FILE)
-
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-
+    if st.button("Restart"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         st.rerun()
