@@ -6,3 +6,4 @@ bcrypt
 python-dotenv
 Pillow
 extra-streamlit-components
+streamlit-aggrid

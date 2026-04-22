@@ -92,10 +92,12 @@ CREATE TABLE IF NOT EXISTS auction_players (
     name TEXT NOT NULL,
     set_name TEXT,
     base_price INT NOT NULL,
-    order_index INT
+    order_index INT,
+    is_captain BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS order_index INT;
+ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS is_captain BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS auction_results (
     id SERIAL PRIMARY KEY,
@@ -428,12 +430,21 @@ def add_auction_team(auction_id: str, team_id: int, purse: int, rtm_remaining: i
 
 
 def add_auction_players(auction_id: str, rows) -> None:
-    # rows: iterable of (name, set_name, base_price, order_index)
+    """Insert auction players. Each row: (name, set_name, base_price, order_index)
+    OR (name, set_name, base_price, order_index, is_captain)."""
+    normalized = []
+    for row in rows:
+        if len(row) == 4:
+            n, s, b, oi = row
+            is_cap = False
+        else:
+            n, s, b, oi, is_cap = row
+        normalized.append((auction_id, n, s, int(b), int(oi), bool(is_cap)))
     with get_cursor(dict_cursor=False) as cur:
         psycopg2.extras.execute_values(
             cur,
-            "INSERT INTO auction_players (auction_id, name, set_name, base_price, order_index) VALUES %s",
-            [(auction_id, n, s, int(b), int(oi)) for (n, s, b, oi) in rows],
+            "INSERT INTO auction_players (auction_id, name, set_name, base_price, order_index, is_captain) VALUES %s",
+            normalized,
         )
 
 
@@ -481,7 +492,7 @@ def get_auction_players_ordered(auction_id: str):
     with get_cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, set_name, base_price, order_index
+            SELECT id, name, set_name, base_price, order_index, is_captain
             FROM auction_players
             WHERE auction_id = %s
             ORDER BY COALESCE(order_index, id)
@@ -496,7 +507,7 @@ def get_auction_results_detailed(auction_id: str):
         cur.execute(
             """
             SELECT ar.id, ar.team_id, ar.sold_price, ar.is_rtm, ar.created_at,
-                   ap.name AS player_name, ap.set_name, ap.base_price,
+                   ap.name AS player_name, ap.set_name, ap.base_price, ap.is_captain,
                    tm.name AS team_name
             FROM auction_results ar
             JOIN auction_players ap ON ap.id = ar.player_id
@@ -507,6 +518,25 @@ def get_auction_results_detailed(auction_id: str):
             (auction_id,),
         )
         return cur.fetchall()
+
+
+def record_captain_enrollment(auction_id: str, captain_name: str, team_id: int, cap_value: int) -> None:
+    """Captain is auto-assigned to their team at auction start. No purse deduction;
+    just writes a result row so the roster persists for resume and reports."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM auction_players WHERE auction_id = %s AND name = %s AND is_captain = TRUE",
+            (auction_id, captain_name),
+        )
+        row = cur.fetchone()
+        player_id = row["id"] if row else None
+        cur.execute(
+            """
+            INSERT INTO auction_results (auction_id, player_id, team_id, sold_price, is_rtm)
+            VALUES (%s, %s, %s, %s, FALSE)
+            """,
+            (auction_id, player_id, team_id, cap_value),
+        )
 
 
 def record_sale(auction_id: str, player_name: str, team_id: int, sold_price: int, is_rtm: bool) -> None:

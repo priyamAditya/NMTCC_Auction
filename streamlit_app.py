@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 import extra_streamlit_components as stx
+from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
 
 from auth import (
     check_admin,
@@ -36,6 +37,7 @@ from db import (
     list_auctions,
     list_master_teams,
     list_players,
+    record_captain_enrollment,
     record_sale,
     update_auction_status,
     update_bid_tiers,
@@ -399,6 +401,9 @@ def _load_auction_from_db(auction_id: str) -> dict:
     set_order: list[str] = []
     set_players: dict[str, list[dict]] = {}
     for p in player_rows:
+        # Captains are auto-enrolled; never enter the bid queue
+        if p.get("is_captain"):
+            continue
         s = p["set_name"]
         if s not in set_players:
             set_players[s] = []
@@ -434,6 +439,7 @@ def _load_auction_from_db(auction_id: str) -> dict:
                 "base": r["base_price"],
                 "sold": r["sold_price"],
                 "is_rtm": bool(r["is_rtm"]),
+                "is_captain": bool(r.get("is_captain")),
             }
         )
         if r["set_name"] in sold_per_set:
@@ -561,6 +567,10 @@ defaults = {
     "rtm_old_team": None,
     # Setup wizard
     "setup_selected_teams": [],  # list of dicts {name, captain, color, id (or None)}
+    "setup_draft": None,  # Screen-1 config, stashed while screen 2 picks players
+    "setup_selected_player_ids": [],  # IDs of players picked on screen 2, in display order
+    "setup_player_sets": {},  # player_id -> set (int)
+    "setup_random_in_set": False,
     # Report
     "report_auction_id": None,
     # Bid ladder for the currently running auction
@@ -1275,7 +1285,7 @@ elif st.session_state.page == "setup":
         )
 
     st.markdown("**Bid ladder** — how much each successive bid raises")
-    l1, l2, l3, l4, l5 = st.columns([1, 1, 1, 1, 1])
+    l1, l2, l3, l4, l5, l6 = st.columns([1, 1, 1, 1, 1, 1])
     with l1:
         t1_up = st.number_input("Tier 1: below ₹", 1, 500, 15, key="ladder_t1_up")
     with l2:
@@ -1286,36 +1296,16 @@ elif st.session_state.page == "setup":
         t2_step = st.number_input("step ₹", 1, 100, 5, key="ladder_t2_step")
     with l5:
         final_step = st.number_input("Tier 3: step ₹", 1, 100, 10, key="ladder_t3_step")
-
-    st.divider()
-
-    # --- Players Upload ---
-    st.subheader("2 · Players")
-    uploaded = st.file_uploader(
-        "Upload Players Excel (columns: player_name, set, base_price)",
-        type=["xlsx"],
-    )
-    df_preview = None
-    if uploaded is not None:
-        try:
-            df_preview = pd.read_excel(uploaded)
-            df_preview.columns = df_preview.columns.str.strip().str.lower().str.replace(" ", "_")
-            required = {"player_name", "set", "base_price"}
-            missing = required - set(df_preview.columns)
-            if missing:
-                st.error(f"Missing columns: {', '.join(missing)}")
-                df_preview = None
-            else:
-                st.success(f"Loaded {len(df_preview)} players across {df_preview['set'].nunique()} sets")
-                st.dataframe(df_preview, use_container_width=True, height=200)
-        except Exception as e:
-            st.error(f"Could not parse Excel: {e}")
-            df_preview = None
+    with l6:
+        default_base_price = st.number_input(
+            "Default base ₹", 1, 100, 5, key="default_base_price",
+            help="Applied to every player in the auction pool",
+        )
 
     st.divider()
 
     # --- Teams ---
-    st.subheader("3 · Teams Participating")
+    st.subheader("2 · Teams Participating")
     st.caption("Max 15 teams. Each team name must be unique. Colours are saved for reuse.")
 
     master_teams = cached_master_teams()
@@ -1484,107 +1474,349 @@ elif st.session_state.page == "setup":
 
     st.divider()
 
-    # --- Validate & Start ---
+    # --- Validate & Next ---
     nav_l, nav_r = st.columns([1, 1])
     with nav_l:
         if st.button("← Back to Home"):
             st.session_state.page = "home"
             st.rerun()
     with nav_r:
-        if st.button("🚀 Start Auction", type="primary", use_container_width=True):
+        if st.button("Next → Pick players", type="primary", use_container_width=True):
             errors = []
-            if uploaded is None or df_preview is None:
-                errors.append("Upload a valid players Excel file")
             if len(st.session_state.setup_selected_teams) < 2:
                 errors.append("Add at least 2 teams")
             if len(st.session_state.setup_selected_teams) > 15:
                 errors.append("Maximum 15 teams")
+            if any(not t.get("captain_id") for t in st.session_state.setup_selected_teams):
+                errors.append("Every team must have a captain picked from the player list")
+            if errors:
+                for e in errors:
+                    st.error(e)
+            else:
+                # Stash the screen-1 state for the player-selection screen.
+                st.session_state.setup_draft = {
+                    "name": auction_name.strip() or None,
+                    "date": auction_date,
+                    "time": auction_time,
+                    "players_per_team": int(players_per_team),
+                    "purse": int(purse),
+                    "rtm_enabled": bool(rtm_enabled),
+                    "rtm_count": int(rtm_count) if rtm_enabled else 0,
+                    "default_base_price": int(default_base_price),
+                    "bid_tiers": [
+                        {"up_to": int(t1_up), "step": int(t1_step)},
+                        {"up_to": int(t2_up), "step": int(t2_step)},
+                        {"up_to": 10000, "step": int(final_step)},
+                    ],
+                }
+                st.session_state.page = "setup_players"
+                st.rerun()
+
+
+# =========================================================
+# SETUP PLAYERS — pick + order the auction pool
+# =========================================================
+elif st.session_state.page == "setup_players":
+    draft = st.session_state.get("setup_draft")
+    if not draft:
+        st.warning("Finish the first setup step first.")
+        if st.button("← Back to setup"):
+            st.session_state.page = "setup"
+            st.rerun()
+        st.stop()
+
+    teams_in_auction = st.session_state.setup_selected_teams
+    captain_ids = {int(t["captain_id"]) for t in teams_in_auction if t.get("captain_id")}
+    captain_id_to_team = {int(t["captain_id"]): t for t in teams_in_auction if t.get("captain_id")}
+
+    head_l, head_r = st.columns([5, 1])
+    with head_l:
+        st.title("Setup · Pick auction pool")
+        st.caption(
+            f"{draft.get('name') or '(unnamed auction)'} · "
+            f"{len(teams_in_auction)} teams · "
+            f"purse ₹{draft['purse']} · "
+            f"base price ₹{draft['default_base_price']}"
+        )
+    with head_r:
+        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+        if st.button("← Back", key="spx_back", use_container_width=True):
+            st.session_state.page = "setup"
+            st.rerun()
+
+    # ---- Captains preview ----
+    st.subheader("Captains (auto-enrolled in their team)")
+    cap_cols = st.columns(min(4, len(teams_in_auction)))
+    cap_value = int(round(draft["purse"] * 0.6))
+    for i, t in enumerate(teams_in_auction):
+        with cap_cols[i % len(cap_cols)]:
+            captain_name = t.get("captain") or "—"
+            fg = t.get("text_color") or "#ffffff"
+            st.markdown(
+                f"<div style='padding:0.55rem 0.85rem; border-radius:10px; "
+                f"background:{t['color']}; color:{fg}; margin-bottom:0.4rem;'>"
+                f"<div style='font-weight:700;'>{html.escape(t['name'])}</div>"
+                f"<div style='font-size:0.82rem; opacity:0.9;'>"
+                f"👑 {html.escape(captain_name)} · ₹{cap_value} (placeholder)"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+    st.caption(
+        f"Captains count toward the squad minimum ({draft['players_per_team']} "
+        f"per team). Their value (60% of purse) is a placeholder and is NOT "
+        f"deducted from the team's remaining purse."
+    )
+
+    st.divider()
+
+    # ---- Available player pool ----
+    st.subheader("Pick players for the auction pool")
+    st.caption(
+        "Use the column filters to search (works on every keystroke). "
+        "Drag rows by the ⠿ handle to reorder. "
+        "Edit the Set column to group players — lower sets are auctioned first."
+    )
+
+    all_master = cached_all_players()
+    pool_players = [p for p in all_master if p["id"] not in captain_ids]
+
+    # Seed per-player set values (default 1), preserving prior choices if the user navigates back
+    existing_sets: dict = st.session_state.setup_player_sets or {}
+    df_rows = []
+    for p in pool_players:
+        df_rows.append(
+            {
+                "id": int(p["id"]),
+                "Name": p["name"],
+                "Role": p.get("role") or "",
+                "Set": int(existing_sets.get(p["id"], 1)),
+            }
+        )
+    import pandas as _pd
+    pool_df = _pd.DataFrame(df_rows)
+
+    gb = GridOptionsBuilder.from_dataframe(pool_df)
+    gb.configure_default_column(
+        filter=True, floatingFilter=True, sortable=False,
+        resizable=True, editable=False,
+    )
+    gb.configure_column("id", hide=True)
+    gb.configure_column(
+        "Name",
+        rowDrag=True,
+        checkboxSelection=True,
+        headerCheckboxSelection=True,
+        minWidth=260,
+        flex=2,
+    )
+    gb.configure_column("Role", minWidth=140, flex=1)
+    gb.configure_column(
+        "Set",
+        editable=True,
+        type=["numericColumn", "numberColumnFilter"],
+        minWidth=80,
+    )
+    gb.configure_selection("multiple", use_checkbox=True, suppress_row_click_selection=True)
+    gb.configure_grid_options(rowDragManaged=True, animateRows=True)
+    grid_options = gb.build()
+
+    prev_selected = st.session_state.setup_selected_player_ids or []
+    # Tell AgGrid to pre-select previously picked rows
+    for row in grid_options.get("rowData", []) or []:
+        row["_selected"] = row["id"] in prev_selected
+
+    grid_response = AgGrid(
+        pool_df,
+        gridOptions=grid_options,
+        update_mode=GridUpdateMode.MODEL_CHANGED,
+        data_return_mode=DataReturnMode.AS_INPUT,
+        fit_columns_on_grid_load=True,
+        allow_unsafe_jscode=True,
+        height=520,
+        key="player_pool_grid",
+    )
+
+    updated_df = grid_response.get("data")
+    selected_rows = grid_response.get("selected_rows")
+
+    # selected_rows can be list-of-dict or DataFrame depending on version
+    if hasattr(selected_rows, "to_dict"):
+        selected_rows = selected_rows.to_dict("records")
+    selected_rows = selected_rows or []
+    selected_id_set = {int(r["id"]) for r in selected_rows}
+
+    random_in_set = st.toggle(
+        "Randomise draw within each set",
+        value=bool(st.session_state.setup_random_in_set),
+        help="When on, players within the same set are shuffled before the auction queue is built.",
+    )
+    st.session_state.setup_random_in_set = bool(random_in_set)
+
+    st.caption(f"**{len(selected_id_set)}** player(s) selected for the auction pool.")
+
+    st.divider()
+
+    # ---- Validate & start ----
+    nav_l, nav_r = st.columns([1, 1])
+    with nav_l:
+        if st.button("← Back to setup", key="spx_back2"):
+            st.session_state.page = "setup"
+            st.rerun()
+    with nav_r:
+        if st.button("🚀 Start Auction", type="primary", use_container_width=True, key="spx_start"):
+            errors = []
+            if len(selected_id_set) == 0:
+                errors.append("Pick at least one player")
+            # Each team must have at least (players_per_team - 1) non-captain slots available
+            min_non_captain = (int(draft["players_per_team"]) - 1) * len(teams_in_auction)
+            if len(selected_id_set) < min_non_captain:
+                errors.append(
+                    f"Need at least {min_non_captain} non-captain players for "
+                    f"{len(teams_in_auction)} teams × {draft['players_per_team']} slots"
+                )
 
             if errors:
                 for e in errors:
                     st.error(e)
             else:
-                dt = datetime.combine(auction_date, auction_time)
-                auction_id = str(uuid.uuid4())
-
-                bid_tiers_cfg = [
-                    {"up_to": int(t1_up), "step": int(t1_step)},
-                    {"up_to": int(t2_up), "step": int(t2_step)},
-                    {"up_to": 10000, "step": int(final_step)},
+                # Persist per-player set choices + selection order into session state
+                ordered_rows = updated_df.to_dict("records") if hasattr(updated_df, "to_dict") else list(updated_df)
+                selected_ordered = [
+                    {
+                        "id": int(r["id"]),
+                        "name": str(r["Name"]),
+                        "role": str(r.get("Role") or ""),
+                        "set": int(r["Set"]) if r.get("Set") is not None else 1,
+                    }
+                    for r in ordered_rows
+                    if int(r["id"]) in selected_id_set
                 ]
+                st.session_state.setup_player_sets = {r["id"]: r["set"] for r in selected_ordered}
+                st.session_state.setup_selected_player_ids = [r["id"] for r in selected_ordered]
 
-                # Async: UI proceeds immediately; daemon thread syncs to Postgres.
+                # Build the auction
+                auction_id = str(uuid.uuid4())
+                dt = datetime.combine(draft["date"], draft["time"])
+                purse = int(draft["purse"])
+                rtm_count_val = int(draft["rtm_count"]) if draft["rtm_enabled"] else 0
+
                 enqueue(
                     create_auction,
                     auction_id=auction_id,
-                    name=auction_name.strip() or None,
+                    name=draft["name"],
                     auction_datetime=dt,
-                    players_per_team=int(players_per_team),
-                    purse=int(purse),
-                    rtm_enabled=bool(rtm_enabled),
-                    rtm_count=int(rtm_count) if rtm_enabled else 0,
-                    bid_tiers=bid_tiers_cfg,
+                    players_per_team=int(draft["players_per_team"]),
+                    purse=purse,
+                    rtm_enabled=bool(draft["rtm_enabled"]),
+                    rtm_count=rtm_count_val,
+                    bid_tiers=draft["bid_tiers"],
                 )
 
                 teams_state = {}
-                for t in st.session_state.setup_selected_teams:
+                for t in teams_in_auction:
                     enqueue(
                         add_auction_team,
                         auction_id,
                         t["id"],
-                        int(purse),
-                        int(rtm_count) if rtm_enabled else 0,
+                        purse,
+                        rtm_count_val,
                     )
                     teams_state[t["name"]] = {
                         "team_id": t["id"],
                         "captain": t["captain"],
+                        "captain_id": t.get("captain_id"),
                         "color": t["color"],
                         "text_color": t.get("text_color") or "#ffffff",
                         "logo": t.get("logo"),
                         "logo_mime": t.get("logo_mime"),
-                        "purse": int(purse),
-                        "players": [],
-                        "rtm_remaining": int(rtm_count) if rtm_enabled else 0,
+                        "purse": purse,  # captain placeholder is NOT deducted
+                        "players": [
+                            {
+                                "player": t["captain"],
+                                "base": cap_value,
+                                "sold": cap_value,
+                                "is_rtm": False,
+                                "is_captain": True,
+                            }
+                        ],
+                        "rtm_remaining": rtm_count_val,
                     }
 
-                # Player order is shuffled per-set at setup; persist the ordering
-                # so a Resume rebuilds the same queue we ran in-memory.
-                set_order = list(df_preview["set"].unique())
-                player_rows = []
+                # Build the player queue grouped by set (asc), optionally shuffled within set
+                by_set: dict = {}
+                for r in selected_ordered:
+                    by_set.setdefault(int(r["set"]), []).append(r)
+                ordered_sets = sorted(by_set.keys())
                 set_players_buf: dict = {}
+                set_order: list = []
+                auction_player_rows: list = []
                 oi = 0
-                for s in set_order:
-                    bucket = df_preview[df_preview["set"] == s].to_dict("records")
-                    random.shuffle(bucket)
-                    set_players_buf[s] = bucket
-                    for p in bucket:
-                        player_rows.append(
-                            (str(p["player_name"]), str(s), p["base_price"], oi)
+                default_base = int(draft["default_base_price"])
+
+                # Captains go in first as is_captain rows with the placeholder value,
+                # so resume + reports reflect them.
+                for t in teams_in_auction:
+                    auction_player_rows.append(
+                        (t["captain"], "Captain", cap_value, oi, True)
+                    )
+                    oi += 1
+
+                for s in ordered_sets:
+                    bucket = list(by_set[s])
+                    if random_in_set:
+                        import random as _r
+                        _r.shuffle(bucket)
+                    set_key = f"Set {s}"
+                    set_order.append(set_key)
+                    set_players_buf[set_key] = [
+                        {
+                            "player_name": row["name"],
+                            "set": set_key,
+                            "base_price": default_base,
+                        }
+                        for row in bucket
+                    ]
+                    for row in bucket:
+                        auction_player_rows.append(
+                            (row["name"], set_key, default_base, oi, False)
                         )
                         oi += 1
-                enqueue(add_auction_players, auction_id, player_rows)
+
+                enqueue(add_auction_players, auction_id, auction_player_rows)
+
+                # Record each captain's placeholder enrollment so reports /
+                # resume see them in the roster. Purse is NOT decremented.
+                for tname, td in teams_state.items():
+                    enqueue(
+                        record_captain_enrollment,
+                        auction_id,
+                        td["captain"],
+                        td["team_id"],
+                        cap_value,
+                    )
+
                 invalidate_auctions_cache()
 
-                # hydrate session state for auction flow — reuse the shuffled
-                # set_players_buf built above so in-memory order matches DB
+                # Hydrate runtime state
                 st.session_state.auction_id = auction_id
                 st.session_state.teams = teams_state
-                st.session_state.players_df = df_preview
-                st.session_state.players_per_team = int(players_per_team)
-                st.session_state.purse = int(purse)
-                st.session_state.rtm_enabled = bool(rtm_enabled)
-                st.session_state.rtm_count = int(rtm_count) if rtm_enabled else 0
-                st.session_state.bid_tiers = bid_tiers_cfg
+                st.session_state.players_per_team = int(draft["players_per_team"])
+                st.session_state.purse = purse
+                st.session_state.rtm_enabled = bool(draft["rtm_enabled"])
+                st.session_state.rtm_count = rtm_count_val
+                st.session_state.bid_tiers = draft["bid_tiers"]
                 st.session_state.bid = 0
-
+                st.session_state.current_bid_team = None
+                st.session_state.last_sold = None
+                st.session_state.current_sale_id = 0
+                st.session_state.shown_sale_id = 0
+                st.session_state.unsold_bucket = []
                 st.session_state.set_order = set_order
                 st.session_state.current_set_idx = 0
-                st.session_state.set_players = {}
-                st.session_state.set_index = {}
-                for s in set_order:
-                    st.session_state.set_players[s] = set_players_buf[s]
-                    st.session_state.set_index[s] = 0
+                st.session_state.set_players = set_players_buf
+                st.session_state.set_index = {s: 0 for s in set_order}
 
+                # Leave setup_draft in case user comes back
                 st.session_state.page = "auction"
                 st.rerun()
 
@@ -1617,10 +1849,16 @@ elif st.session_state.page == "auction":
         if data["players"]:
             rows = []
             for p in data["players"]:
-                tag = "<span class='rtm-tag'>RTM</span>" if p.get("is_rtm") else ""
+                tags = []
+                if p.get("is_captain"):
+                    tags.append("👑")
+                if p.get("is_rtm"):
+                    tags.append("<span class='rtm-tag'>RTM</span>")
+                tag_html = " ".join(tags)
+                prefix = f"{tag_html} " if tag_html else ""
                 rows.append(
                     f"<div class='player-row'>"
-                    f"<div class='player-cell-name'>{html.escape(str(p['player']))}{tag}</div>"
+                    f"<div class='player-cell-name'>{prefix}{html.escape(str(p['player']))}</div>"
                     f"<div class='player-cell-price{' rtm' if p.get('is_rtm') else ''}'>₹{p['sold']}</div>"
                     f"</div>"
                 )
@@ -2286,10 +2524,16 @@ elif st.session_state.page == "report":
         if data["players"]:
             rows = []
             for p in sorted(data["players"], key=lambda x: -x["sold"]):
-                tag = "<span class='rtm-tag'>RTM</span>" if p.get("is_rtm") else ""
+                tags = []
+                if p.get("is_captain"):
+                    tags.append("👑")
+                if p.get("is_rtm"):
+                    tags.append("<span class='rtm-tag'>RTM</span>")
+                tag_html = " ".join(tags)
+                prefix = f"{tag_html} " if tag_html else ""
                 rows.append(
                     f"<div class='player-row'>"
-                    f"<div class='player-cell-name'>{html.escape(str(p['player']))}{tag}</div>"
+                    f"<div class='player-cell-name'>{prefix}{html.escape(str(p['player']))}</div>"
                     f"<div class='player-cell-price{' rtm' if p.get('is_rtm') else ''}'>₹{p['sold']}</div>"
                     f"</div>"
                 )
