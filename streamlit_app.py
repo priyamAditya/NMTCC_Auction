@@ -1,5 +1,6 @@
 import random
 import urllib.parse
+import uuid
 from datetime import date, datetime, time
 from io import BytesIO
 
@@ -19,6 +20,7 @@ from db import (
     record_sale,
     update_auction_status,
 )
+from sync_queue import enqueue, stats as sync_stats
 
 st.set_page_config(page_title="NMTCC Auction", layout="wide", page_icon="🏏")
 
@@ -63,12 +65,54 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Ensure schema exists
+# Ensure schema exists (init_schema itself is no-op after first success)
 try:
     init_schema()
 except Exception as e:
     st.error(f"Database error: {e}")
     st.stop()
+
+
+# ---------------- Cached reads ----------------
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_master_teams():
+    return list_master_teams()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def cached_recent_auctions():
+    return list_auctions()
+
+
+def invalidate_master_teams_cache():
+    cached_master_teams.clear()
+
+
+def invalidate_auctions_cache():
+    cached_recent_auctions.clear()
+
+
+# ---------------- Sync queue status (sidebar) ----------------
+def render_sync_sidebar():
+    s = sync_stats()
+    with st.sidebar:
+        st.markdown("### DB Sync")
+        backlog = s["backlog"]
+        if backlog == 0:
+            st.success(f"Up to date · {s['succeeded']} synced")
+        else:
+            st.warning(f"Syncing… {backlog} pending")
+        st.caption(
+            f"enqueued: {s['enqueued']} · succeeded: {s['succeeded']} · "
+            f"retried: {s['retried']} · failed: {s['failed']}"
+        )
+        if s["last_error"]:
+            st.caption(f"last error: {s['last_error']}")
+        if st.button("Refresh status", key="refresh_sync"):
+            st.rerun()
+
+
+render_sync_sidebar()
 
 
 # ---------------- SESSION STATE ----------------
@@ -183,7 +227,7 @@ if st.session_state.page == "home":
         st.markdown("&nbsp;", unsafe_allow_html=True)
 
         with st.expander("📋 Past Auctions", expanded=False):
-            auctions = list_auctions()
+            auctions = cached_recent_auctions()
             if not auctions:
                 st.caption("No past auctions yet.")
             else:
@@ -265,7 +309,7 @@ elif st.session_state.page == "setup":
     st.subheader("3 · Teams Participating")
     st.caption("Max 15 teams. Each team name must be unique. Colours are saved for reuse.")
 
-    master_teams = list_master_teams()
+    master_teams = cached_master_teams()
     master_names = [t["name"] for t in master_teams]
     selected_names = [t["name"] for t in st.session_state.setup_selected_teams]
 
@@ -329,6 +373,7 @@ elif st.session_state.page == "setup":
                         team_id = create_master_team(
                             nn, new_captain.strip(), new_color, new_text_color
                         )
+                        invalidate_master_teams_cache()
                         st.session_state.setup_selected_teams.append(
                             {
                                 "id": team_id,
@@ -385,7 +430,12 @@ elif st.session_state.page == "setup":
                     st.error(e)
             else:
                 dt = datetime.combine(auction_date, auction_time)
-                auction_id = create_auction(
+                auction_id = str(uuid.uuid4())
+
+                # Async: UI proceeds immediately; daemon thread syncs to Postgres.
+                enqueue(
+                    create_auction,
+                    auction_id=auction_id,
                     name=auction_name.strip() or None,
                     auction_datetime=dt,
                     players_per_team=int(players_per_team),
@@ -394,10 +444,10 @@ elif st.session_state.page == "setup":
                     rtm_count=int(rtm_count) if rtm_enabled else 0,
                 )
 
-                # persist teams participating
                 teams_state = {}
                 for t in st.session_state.setup_selected_teams:
-                    add_auction_team(
+                    enqueue(
+                        add_auction_team,
                         auction_id,
                         t["id"],
                         int(purse),
@@ -413,12 +463,12 @@ elif st.session_state.page == "setup":
                         "rtm_remaining": int(rtm_count) if rtm_enabled else 0,
                     }
 
-                # persist players
                 player_rows = [
                     (str(r["player_name"]), str(r["set"]), r["base_price"])
                     for r in df_preview.to_dict("records")
                 ]
-                add_auction_players(auction_id, player_rows)
+                enqueue(add_auction_players, auction_id, player_rows)
+                invalidate_auctions_cache()
 
                 # hydrate session state for auction flow
                 st.session_state.auction_id = auction_id
@@ -483,7 +533,8 @@ elif st.session_state.page == "auction":
         else:
             st.session_state.current_set_idx += 1
     else:
-        update_auction_status(st.session_state.auction_id, "completed")
+        enqueue(update_auction_status, st.session_state.auction_id, "completed")
+        invalidate_auctions_cache()
         st.session_state.page = "trade"
         st.rerun()
 
@@ -532,7 +583,8 @@ elif st.session_state.page == "auction":
                 {"player": player["player_name"], "base": player["base_price"], "sold": price}
             )
             td["purse"] -= price
-            record_sale(
+            enqueue(
+                record_sale,
                 st.session_state.auction_id,
                 player["player_name"],
                 td["team_id"],
@@ -561,7 +613,8 @@ elif st.session_state.page == "auction":
                 }
             )
             td["purse"] -= price
-            record_sale(
+            enqueue(
+                record_sale,
                 st.session_state.auction_id,
                 st.session_state.rtm_player["player_name"],
                 td["team_id"],
@@ -596,7 +649,8 @@ elif st.session_state.page == "auction":
                     }
                 )
                 td["purse"] -= price
-                record_sale(
+                enqueue(
+                    record_sale,
                     st.session_state.auction_id,
                     st.session_state.rtm_player["player_name"],
                     td["team_id"],
@@ -623,7 +677,8 @@ elif st.session_state.page == "auction":
                 )
                 td["purse"] -= price
                 td["rtm_remaining"] -= 1
-                record_sale(
+                enqueue(
+                    record_sale,
                     st.session_state.auction_id,
                     st.session_state.rtm_player["player_name"],
                     td["team_id"],

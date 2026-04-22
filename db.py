@@ -1,4 +1,5 @@
 import os
+import threading
 from contextlib import contextmanager
 
 import psycopg2
@@ -94,9 +95,21 @@ def get_cursor(dict_cursor: bool = True):
             cur.close()
 
 
+_schema_ready = False
+_schema_lock = threading.Lock()
+
+
 def init_schema() -> None:
-    with get_cursor(dict_cursor=False) as cur:
-        cur.execute(SCHEMA_SQL)
+    """Idempotent; safe to call on every rerun. Network call only runs once per process."""
+    global _schema_ready
+    if _schema_ready:
+        return
+    with _schema_lock:
+        if _schema_ready:
+            return
+        with get_cursor(dict_cursor=False) as cur:
+            cur.execute(SCHEMA_SQL)
+        _schema_ready = True
 
 
 # ---------- teams master ----------
@@ -128,6 +141,7 @@ def create_master_team(name: str, captain: str, color: str, text_color: str) -> 
 # ---------- auctions ----------
 
 def create_auction(
+    auction_id: str,
     name: str,
     auction_datetime,
     players_per_team: int,
@@ -135,16 +149,16 @@ def create_auction(
     rtm_enabled: bool,
     rtm_count: int,
 ) -> str:
+    """Insert with a caller-supplied UUID so the UI doesn't block on this round-trip."""
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO auctions (name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'active')
-            RETURNING id
+            INSERT INTO auctions (id, name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'active')
             """,
-            (name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count),
+            (auction_id, name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count),
         )
-        return str(cur.fetchone()["id"])
+        return auction_id
 
 
 def add_auction_team(auction_id: str, team_id: int, purse: int, rtm_remaining: int) -> None:
