@@ -213,22 +213,6 @@ st.markdown(
     }
     .rtm-pill.none { opacity: 0.55; }
 
-    /* ---- Per-team bid buttons ---- */
-    .team-bid-btn {
-        display: flex; justify-content: space-between; align-items: center;
-        padding: 0.65rem 0.9rem; border-radius: 10px;
-        font-weight: 700; text-decoration: none;
-        margin-bottom: 0.45rem;
-        transition: transform 0.1s, box-shadow 0.18s, opacity 0.15s;
-        border: 2px solid transparent;
-    }
-    .team-bid-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,0.22); }
-    .team-bid-btn.active { border-color: #fbbf24; box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.35); }
-    .team-bid-btn.disabled { opacity: 0.35; pointer-events: none; }
-    .team-bid-btn-name { font-size: 0.95rem; }
-    .team-bid-btn-amt { font-size: 1.05rem; }
-    .team-bid-btn-step { font-size: 0.7rem; opacity: 0.8; margin-right: 0.35rem; }
-
     /* ---- Timeline ---- */
     .timeline { max-height: 460px; overflow-y: auto; padding-right: 0.5rem; }
     .tl-item {
@@ -953,32 +937,6 @@ elif st.session_state.page == "auction":
             amount=int(price),
         )
 
-    # ---------------- Query-param action: a team placed a bid ----------------
-    if "bid_team" in st.query_params:
-        pending_team = st.query_params.get("bid_team")
-        st.query_params.clear()
-        if pending_team in st.session_state.teams:
-            # Use the ladder to determine the next bid amount.
-            tiers = st.session_state.bid_tiers or DEFAULT_BID_TIERS
-            if st.session_state.current_bid_team is None:
-                # First bidder accepts the current display (base)
-                new_bid = int(st.session_state.bid)
-            else:
-                step = step_for_bid(int(st.session_state.bid), tiers)
-                new_bid = int(st.session_state.bid) + step
-            if st.session_state.teams[pending_team]["purse"] >= new_bid:
-                st.session_state.bid = new_bid
-                st.session_state.current_bid_team = pending_team
-                log_event(
-                    st.session_state.auction_id,
-                    "bid",
-                    team=pending_team,
-                    amount=new_bid,
-                )
-                st.rerun()
-            else:
-                st.warning(f"{pending_team} cannot afford ₹{new_bid}")
-
     # ---------------- Walk to next unsold player ----------------
     while st.session_state.current_set_idx < len(st.session_state.set_order):
         current_set = st.session_state.set_order[st.session_state.current_set_idx]
@@ -1068,38 +1026,69 @@ elif st.session_state.page == "auction":
             if int(custom) != int(st.session_state.bid):
                 st.session_state.bid = int(custom)
 
-        # Per-team bid buttons, 2 columns wide
+        # Per-team bid buttons — native st.button, styled per-team via the
+        # .st-key-<key> class Streamlit attaches to keyed elements. No href,
+        # no URL params, no page navigation.
         st.markdown(
             "<div class='micro-label' style='margin:0.4rem 0 0.3rem 0;'>Tap a team to bid</div>",
             unsafe_allow_html=True,
         )
         team_items = list(st.session_state.teams.items())
+
+        # Inject per-team CSS for the buttons we're about to render
+        css_rules = []
+        for i, (tname, tdata) in enumerate(team_items):
+            bg = tdata["color"]
+            fg = tdata.get("text_color") or "#ffffff"
+            is_active = (tname == st.session_state.current_bid_team)
+            glow = "box-shadow: 0 0 0 3px rgba(251,191,36,0.55);" if is_active else ""
+            css_rules.append(
+                f".st-key-bid_btn_{i} button {{"
+                f"  background: {bg} !important; color: {fg} !important;"
+                f"  border: 2px solid {bg} !important; font-weight: 700 !important;"
+                f"  padding: 0.6rem 0.8rem !important; border-radius: 10px !important;"
+                f"  {glow}"
+                f"}}"
+                f".st-key-bid_btn_{i} button:hover:not(:disabled) {{"
+                f"  filter: brightness(1.08); transform: translateY(-1px);"
+                f"}}"
+                f".st-key-bid_btn_{i} button:disabled {{ opacity: 0.4; }}"
+            )
+        st.markdown(f"<style>{''.join(css_rules)}</style>", unsafe_allow_html=True)
+
         btn_cols = st.columns(2)
         for i, (tname, tdata) in enumerate(team_items):
-            col = btn_cols[i % 2]
-            with col:
-                if st.session_state.current_bid_team is None:
-                    preview_next = int(st.session_state.bid)
-                else:
-                    preview_next = int(st.session_state.bid) + step_for_bid(int(st.session_state.bid), tiers)
-                can_afford = tdata["purse"] >= preview_next
-                is_active = (tname == st.session_state.current_bid_team)
-                classes = "team-bid-btn"
-                if is_active:
-                    classes += " active"
-                if not can_afford:
-                    classes += " disabled"
-                href = f"?bid_team={urllib.parse.quote(tname)}" if can_afford else "#"
-                bg = tdata["color"]
-                fg = tdata.get("text_color") or "#ffffff"
-                st.markdown(
-                    f"<a class='{classes}' href='{href}' target='_self' "
-                    f"style='background:{bg}; color:{fg};'>"
-                    f"<span class='team-bid-btn-name'>{html.escape(tname)}</span>"
-                    f"<span class='team-bid-btn-amt'>₹{preview_next}</span>"
-                    f"</a>",
-                    unsafe_allow_html=True,
+            if st.session_state.current_bid_team is None:
+                preview_next = int(st.session_state.bid)
+            else:
+                preview_next = int(st.session_state.bid) + step_for_bid(int(st.session_state.bid), tiers)
+
+            can_afford = tdata["purse"] >= preview_next
+            is_active = (tname == st.session_state.current_bid_team)
+            # Can't bid against your own standing bid
+            is_disabled = (not can_afford) or is_active
+            if is_active:
+                label = f"👑 {tname}  ·  ₹{int(st.session_state.bid)}"
+            else:
+                label = f"{tname}  ·  ₹{preview_next}"
+
+            with btn_cols[i % 2]:
+                clicked = st.button(
+                    label,
+                    key=f"bid_btn_{i}",
+                    use_container_width=True,
+                    disabled=is_disabled,
                 )
+            if clicked:
+                st.session_state.bid = preview_next
+                st.session_state.current_bid_team = tname
+                log_event(
+                    st.session_state.auction_id,
+                    "bid",
+                    team=tname,
+                    amount=preview_next,
+                )
+                st.rerun()
 
         # RTM "previous team" + SELL
         sell_cols = st.columns([2, 2])
