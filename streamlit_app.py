@@ -1615,10 +1615,13 @@ elif st.session_state.page == "setup_players":
     import pandas as _pd
     pool_df = _pd.DataFrame(df_rows)
 
+    if pool_df.empty:
+        st.warning("No players in the master DB to show. Register players first.")
+        st.stop()
+
     gb = GridOptionsBuilder.from_dataframe(pool_df)
     gb.configure_default_column(
-        filter=True, floatingFilter=True, sortable=False,
-        resizable=True, editable=False,
+        filter=True, floatingFilter=True, resizable=True, editable=False
     )
     gb.configure_column("id", hide=True)
     gb.configure_column(
@@ -1627,34 +1630,21 @@ elif st.session_state.page == "setup_players":
         checkboxSelection=True,
         headerCheckboxSelection=True,
         minWidth=260,
-        flex=2,
     )
-    gb.configure_column("Role", minWidth=140, flex=1)
-    gb.configure_column(
-        "Set",
-        editable=True,
-        type=["numericColumn", "numberColumnFilter"],
-        minWidth=80,
-    )
+    gb.configure_column("Role", minWidth=140)
+    gb.configure_column("Set", editable=True, minWidth=80)
     gb.configure_selection("multiple", use_checkbox=True)
     gb.configure_grid_options(
         rowDragManaged=True,
         animateRows=True,
         suppressRowClickSelection=True,
     )
-    grid_options = gb.build()
-
-    prev_selected = st.session_state.setup_selected_player_ids or []
-    # Tell AgGrid to pre-select previously picked rows
-    for row in grid_options.get("rowData", []) or []:
-        row["_selected"] = row["id"] in prev_selected
 
     grid_response = AgGrid(
         pool_df,
-        gridOptions=grid_options,
+        gridOptions=gb.build(),
         update_mode=GridUpdateMode.MODEL_CHANGED,
         data_return_mode=DataReturnMode.AS_INPUT,
-        fit_columns_on_grid_load=True,
         allow_unsafe_jscode=True,
         height=520,
         key="player_pool_grid",
