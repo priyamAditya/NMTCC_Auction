@@ -228,6 +228,66 @@ st.markdown(
     .tl-ts { font-size: 0.72rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
     .tl-body b { color: #0f172a; }
 
+    /* ---- Sold modal ---- */
+    @keyframes sold-slam {
+        0%   { transform: scale(0.35) rotate(-6deg); opacity: 0; }
+        55%  { transform: scale(1.12) rotate(2.5deg); opacity: 1; }
+        80%  { transform: scale(0.97) rotate(-1deg); }
+        100% { transform: scale(1) rotate(0); opacity: 1; }
+    }
+    @keyframes price-pulse {
+        0%, 100% { transform: scale(1);    text-shadow: 0 0 20px rgba(251,191,36,0.4); }
+        50%      { transform: scale(1.08); text-shadow: 0 0 44px rgba(251,191,36,0.9); }
+    }
+    @keyframes shimmer {
+        0%   { background-position: -200% 0; }
+        100% { background-position:  200% 0; }
+    }
+    .sold-card {
+        animation: sold-slam 0.7s cubic-bezier(0.34, 1.56, 0.64, 1);
+        padding: 2rem 1.6rem;
+        border-radius: 18px;
+        text-align: center;
+        box-shadow: 0 18px 60px rgba(0,0,0,0.35), 0 0 0 6px rgba(255,255,255,0.08);
+        position: relative; overflow: hidden;
+    }
+    .sold-card::before {
+        content: ''; position: absolute; inset: 0;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent);
+        background-size: 200% 100%;
+        animation: shimmer 1.8s ease-in-out 0.5s infinite;
+        pointer-events: none;
+    }
+    .sold-label {
+        font-size: 1rem; letter-spacing: 8px; font-weight: 900;
+        opacity: 0.85; margin-bottom: 0.6rem;
+    }
+    .sold-player {
+        font-size: 2.4rem; font-weight: 900; line-height: 1.1;
+        margin-bottom: 0.6rem; letter-spacing: -0.5px;
+    }
+    .sold-to {
+        font-size: 0.85rem; opacity: 0.75; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 4px; margin-bottom: 0.2rem;
+    }
+    .sold-team {
+        font-size: 1.5rem; font-weight: 800; line-height: 1; margin-bottom: 1.1rem;
+    }
+    .sold-price {
+        font-size: 4rem; font-weight: 900; color: #fbbf24; line-height: 1;
+        animation: price-pulse 1.4s ease-in-out 0.6s infinite;
+    }
+    .sold-rtm {
+        display: inline-block;
+        background: linear-gradient(135deg, #8b5cf6, #c026d3);
+        color: white; font-weight: 800;
+        padding: 0.25rem 0.9rem; border-radius: 999px;
+        font-size: 0.8rem; letter-spacing: 2px;
+        margin-bottom: 0.9rem;
+        box-shadow: 0 0 20px rgba(139,92,246,0.5);
+        animation: sold-slam 0.55s 0.3s both;
+    }
+
     /* Compact, prominent bid amount in the hero's right column */
     .bid-now {
         display: flex; flex-direction: column; align-items: center;
@@ -356,7 +416,11 @@ def resume_auction(auction_id: str) -> None:
     st.session_state.set_index = snap["set_index"]
     st.session_state.current_set_idx = snap["current_set_idx"]
     st.session_state.bid = 0
-    # Reset transient RTM/bid state; resume is fresh from the current player
+    # Reset transient state; resume starts clean
+    st.session_state.unsold_bucket = []
+    st.session_state.last_sold = None
+    st.session_state.current_sale_id = 0
+    st.session_state.shown_sale_id = 0
     st.session_state.rtm_stage = None
     st.session_state.rtm_player = None
     st.session_state.rtm_price = 0
@@ -431,6 +495,12 @@ defaults = {
     "bid_tiers": None,
     # Dedup flag so we only emit new_player once per distinct player
     "last_logged_player": None,
+    # Players pushed to the unsold pile to be re-auctioned at the end
+    "unsold_bucket": [],
+    # Sold-modal plumbing — show once per sale, don't reopen after native dismiss
+    "last_sold": None,
+    "current_sale_id": 0,
+    "shown_sale_id": 0,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -945,22 +1015,78 @@ elif st.session_state.page == "auction":
             team=team_name,
             amount=int(price),
         )
+        # Queue the sold-modal for the next rerun
+        st.session_state.last_sold = {
+            "player": player_obj["player_name"],
+            "team": team_name,
+            "color": td["color"],
+            "text_color": td.get("text_color") or "#ffffff",
+            "price": int(price),
+            "is_rtm": bool(is_rtm),
+        }
+        st.session_state.current_sale_id = int(st.session_state.get("current_sale_id", 0)) + 1
 
-    # ---------------- Walk to next unsold player ----------------
+    # ---------------- Sold modal (shows once per sale) ----------------
+    if (
+        st.session_state.get("last_sold")
+        and st.session_state.get("current_sale_id", 0) > st.session_state.get("shown_sale_id", 0)
+    ):
+        st.session_state.shown_sale_id = int(st.session_state.current_sale_id)
+
+        @st.dialog("🎉 SOLD!", width="large")
+        def _show_sold_modal():
+            info = st.session_state.last_sold or {}
+            rtm_badge = "<div class='sold-rtm'>⚡ VIA RTM</div>" if info.get("is_rtm") else ""
+            st.markdown(
+                f"<div class='sold-card' style='background:{info.get('color','#1e293b')}; "
+                f"color:{info.get('text_color','#ffffff')};'>"
+                f"{rtm_badge}"
+                f"<div class='sold-label'>SOLD</div>"
+                f"<div class='sold-player'>{html.escape(str(info.get('player','')))}</div>"
+                f"<div class='sold-to'>to</div>"
+                f"<div class='sold-team'>{html.escape(str(info.get('team','')))}</div>"
+                f"<div class='sold-price'>₹{info.get('price',0)}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("Continue →", type="primary", use_container_width=True, key="dismiss_sold"):
+                st.rerun()
+
+        _show_sold_modal()
+
+    # ---------------- Walk to next player (main phase, then unsold phase) ----------------
+    player = None
+    current_set = None
+    phase = "main"
+
     while st.session_state.current_set_idx < len(st.session_state.set_order):
         current_set = st.session_state.set_order[st.session_state.current_set_idx]
         idx = st.session_state.set_index[current_set]
         if idx < len(st.session_state.set_players[current_set]):
             player = st.session_state.set_players[current_set][idx]
             break
-        else:
-            st.session_state.current_set_idx += 1
-    else:
+        st.session_state.current_set_idx += 1
+
+    if player is None and st.session_state.unsold_bucket:
+        phase = "unsold"
+        player = st.session_state.unsold_bucket[0]
+        current_set = str(player.get("set", "Unsold"))
+
+    if player is None:
         enqueue(update_auction_status, st.session_state.auction_id, "completed")
         invalidate_auctions_cache()
         log_event(st.session_state.auction_id, "auction_over")
         st.session_state.page = "trade"
         st.rerun()
+
+    def _advance(is_unsold_phase: bool, current_set_name: str):
+        """After a sale / unsold action, move to the next player."""
+        if is_unsold_phase:
+            # Pop the head of the unsold bucket regardless of sale or skip
+            if st.session_state.unsold_bucket:
+                st.session_state.unsold_bucket.pop(0)
+        else:
+            st.session_state.set_index[current_set_name] += 1
 
     # Fresh player → start bid at base price + reset top bidder
     base_price = int(player["base_price"])
@@ -981,10 +1107,17 @@ elif st.session_state.page == "auction":
     # ---------------- Progress strip ----------------
     total_players = sum(len(ps) for ps in st.session_state.set_players.values())
     sold_players = sum(len(t["players"]) for t in st.session_state.teams.values())
+    bucket_size = len(st.session_state.unsold_bucket)
+    phase_label = (
+        f"🔁 Unsold round · {bucket_size} left"
+        if phase == "unsold"
+        else f"Set: <b>{html.escape(str(current_set))}</b>"
+    )
     st.markdown(
         f"<div class='progress-strip'>"
-        f"<div>Set: <b>{html.escape(str(current_set))}</b></div>"
-        f"<div>Progress: <b>{sold_players}/{total_players}</b> players sold</div>"
+        f"<div>{phase_label}</div>"
+        f"<div>Progress: <b>{sold_players}/{total_players}</b> sold · "
+        f"<b>{bucket_size}</b> unsold</div>"
         f"<div class='auction-id'>Auction: {st.session_state.auction_id[:8]}…</div>"
         f"</div>",
         unsafe_allow_html=True,
@@ -1088,8 +1221,8 @@ elif st.session_state.page == "auction":
                 )
                 st.rerun()
 
-        # SELL + RTM actions
-        sell_cols = st.columns([3, 1])
+        # SELL + RTM + Unsold actions
+        sell_cols = st.columns([3, 1, 1])
         with sell_cols[0]:
             sell_disabled = st.session_state.current_bid_team is None
             sell_label = (
@@ -1124,7 +1257,6 @@ elif st.session_state.page == "auction":
                     if tdata["purse"] < int(st.session_state.bid):
                         continue
                     if tname == st.session_state.current_bid_team:
-                        # can't RTM against yourself
                         continue
                     if st.button(
                         f"{tname} — RTM × {rtm_left}",
@@ -1137,10 +1269,37 @@ elif st.session_state.page == "auction":
                             int(st.session_state.bid),
                             is_rtm=True,
                         )
-                        st.session_state.set_index[current_set] += 1
+                        _advance(phase == "unsold", current_set)
                         st.session_state.bid = 0
                         st.session_state.current_bid_team = None
                         st.rerun()
+        with sell_cols[2]:
+            unsold_help = (
+                "Remove this player for good (no one wants them)"
+                if phase == "unsold"
+                else "Park this player in the unsold pile; they return after all sets are done"
+            )
+            if st.button(
+                "🚫 Unsold",
+                key="unsold_btn",
+                use_container_width=True,
+                help=unsold_help,
+            ):
+                log_event(
+                    st.session_state.auction_id,
+                    "unsold",
+                    player=player["player_name"],
+                    set=str(current_set),
+                    phase=phase,
+                )
+                if phase == "main":
+                    # park for later
+                    st.session_state.unsold_bucket.append(player)
+                # In unsold phase, _advance pops the head regardless — player is gone.
+                _advance(phase == "unsold", current_set)
+                st.session_state.bid = 0
+                st.session_state.current_bid_team = None
+                st.rerun()
 
         # Bid-ladder editor (editable mid-auction)
         with st.expander("⚙️ Bid ladder", expanded=False):
@@ -1174,7 +1333,7 @@ elif st.session_state.page == "auction":
             st.error(f"{final_team} does not have enough purse!")
         else:
             _finalize_sale(player, final_team, price, is_rtm=False)
-            st.session_state.set_index[current_set] += 1
+            _advance(phase == "unsold", current_set)
             st.session_state.bid = 0
             st.session_state.current_bid_team = None
             st.rerun()
@@ -1191,7 +1350,7 @@ elif st.session_state.page == "auction":
             icons = {
                 "bid": "📈", "sell": "💰", "rtm_triggered": "🔁", "rtm_used": "🔁",
                 "rtm_skipped": "⏭", "new_player": "🆕", "trade_proposed": "🤝",
-                "trade_accepted": "✅", "trade_rejected": "❌", "auction_over": "🏁",
+                "trade_accepted": "✅", "trade_rejected": "❌", "unsold": "🚫", "auction_over": "🏁",
             }
             rows = []
             for ev in reversed(events):
@@ -1212,6 +1371,9 @@ elif st.session_state.page == "auction":
                     body = f"New player: <b>{html.escape(ev.get('player',''))}</b> (set {html.escape(str(ev.get('set','')))}, base ₹{ev.get('base','')})"
                 elif etype in ("trade_proposed", "trade_accepted", "trade_rejected"):
                     body = f"Trade {etype.split('_')[1]}: <b>{html.escape(ev.get('team_a',''))}</b> ↔ <b>{html.escape(ev.get('team_b',''))}</b>"
+                elif etype == "unsold":
+                    phase_tag = " (bucket)" if ev.get("phase") == "unsold" else ""
+                    body = f"<b>{html.escape(ev.get('player',''))}</b> unsold{phase_tag}"
                 elif etype == "auction_over":
                     body = "Auction completed"
                 else:
@@ -1475,7 +1637,7 @@ elif st.session_state.page == "report":
         icons = {
             "bid": "📈", "sell": "💰", "rtm_triggered": "🔁", "rtm_used": "🔁",
             "rtm_skipped": "⏭", "new_player": "🆕", "trade_proposed": "🤝",
-            "trade_accepted": "✅", "trade_rejected": "❌", "auction_over": "🏁",
+            "trade_accepted": "✅", "trade_rejected": "❌", "unsold": "🚫", "auction_over": "🏁",
         }
         rows = []
         for ev in reversed(events):
