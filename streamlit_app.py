@@ -14,6 +14,10 @@ from db import (
     add_auction_team,
     create_auction,
     create_master_team,
+    get_auction,
+    get_auction_players_ordered,
+    get_auction_results_detailed,
+    get_auction_teams_full,
     get_master_team_by_name,
     init_schema,
     list_auctions,
@@ -213,6 +217,101 @@ def invalidate_auctions_cache():
     cached_recent_auctions.clear()
 
 
+def _load_auction_from_db(auction_id: str) -> dict:
+    """Read an auction + its teams/players/results and assemble the same shape
+    the runtime state uses. Used for Resume and for the Report page."""
+    a = get_auction(auction_id)
+    if not a:
+        raise ValueError(f"auction {auction_id} not found")
+    teams_rows = get_auction_teams_full(auction_id)
+    player_rows = get_auction_players_ordered(auction_id)
+    result_rows = get_auction_results_detailed(auction_id)
+
+    set_order: list[str] = []
+    set_players: dict[str, list[dict]] = {}
+    for p in player_rows:
+        s = p["set_name"]
+        if s not in set_players:
+            set_players[s] = []
+            set_order.append(s)
+        set_players[s].append(
+            {"player_name": p["name"], "set": s, "base_price": p["base_price"]}
+        )
+
+    teams: dict[str, dict] = {}
+    team_id_to_name: dict[int, str] = {}
+    for t in teams_rows:
+        teams[t["name"]] = {
+            "team_id": t["team_id"],
+            "captain": t["captain"],
+            "color": t["color"],
+            "text_color": t.get("text_color") or "#ffffff",
+            "purse": t["remaining_purse"],
+            "players": [],
+            "rtm_remaining": t["rtm_remaining"],
+        }
+        team_id_to_name[t["team_id"]] = t["name"]
+
+    sold_per_set: dict[str, int] = {s: 0 for s in set_order}
+    for r in result_rows:
+        tname = team_id_to_name.get(r["team_id"])
+        if not tname:
+            continue
+        teams[tname]["players"].append(
+            {
+                "player": r["player_name"],
+                "base": r["base_price"],
+                "sold": r["sold_price"],
+                "is_rtm": bool(r["is_rtm"]),
+            }
+        )
+        if r["set_name"] in sold_per_set:
+            sold_per_set[r["set_name"]] += 1
+
+    set_index = {s: min(sold_per_set.get(s, 0), len(set_players[s])) for s in set_order}
+    current_set_idx = len(set_order)
+    for i, s in enumerate(set_order):
+        if set_index[s] < len(set_players[s]):
+            current_set_idx = i
+            break
+
+    return {
+        "auction_id": auction_id,
+        "auction": dict(a),
+        "teams": teams,
+        "set_order": set_order,
+        "set_players": set_players,
+        "set_index": set_index,
+        "current_set_idx": current_set_idx,
+        "results": [dict(r) for r in result_rows],
+    }
+
+
+def resume_auction(auction_id: str) -> None:
+    snap = _load_auction_from_db(auction_id)
+    a = snap["auction"]
+    st.session_state.auction_id = snap["auction_id"]
+    st.session_state.teams = snap["teams"]
+    st.session_state.players_per_team = int(a["players_per_team"])
+    st.session_state.purse = int(a["purse"])
+    st.session_state.rtm_enabled = bool(a["rtm_enabled"])
+    st.session_state.rtm_count = int(a["rtm_count"])
+    st.session_state.set_order = snap["set_order"]
+    st.session_state.set_players = snap["set_players"]
+    st.session_state.set_index = snap["set_index"]
+    st.session_state.current_set_idx = snap["current_set_idx"]
+    st.session_state.bid = 0
+    # Reset transient RTM/bid state; resume is fresh from the current player
+    st.session_state.rtm_stage = None
+    st.session_state.rtm_player = None
+    st.session_state.rtm_price = 0
+    st.session_state.rtm_counter_price = 0
+    st.session_state.rtm_new_team = None
+    st.session_state.rtm_old_team = None
+    st.session_state.current_bid_team = None
+    st.session_state.page = "auction"
+
+
 # ---------------- Sync queue status (sidebar) ----------------
 def render_sync_sidebar():
     s = sync_stats()
@@ -263,6 +362,8 @@ defaults = {
     "rtm_old_team": None,
     # Setup wizard
     "setup_selected_teams": [],  # list of dicts {name, captain, color, id (or None)}
+    # Report
+    "report_auction_id": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -349,17 +450,40 @@ if st.session_state.page == "home":
 
         with st.expander("📋 Past Auctions", expanded=False):
             auctions = cached_recent_auctions()
+            if st.button("↻ Refresh list", key="refresh_auctions"):
+                invalidate_auctions_cache()
+                st.rerun()
             if not auctions:
                 st.caption("No past auctions yet.")
             else:
                 for a in auctions:
                     dt = a["auction_datetime"].strftime("%Y-%m-%d %H:%M")
                     name = a["name"] or "(unnamed)"
-                    st.markdown(
-                        f"**{name}** — {dt} · status: `{a['status']}` "
-                        f"<br><span class='auction-id'>ID: {a['id']}</span>",
-                        unsafe_allow_html=True,
-                    )
+                    aid = str(a["id"])
+                    status = a["status"]
+
+                    row_l, row_r = st.columns([4, 2])
+                    with row_l:
+                        st.markdown(
+                            f"**{name}** — {dt} · status: `{status}` "
+                            f"<br><span class='auction-id'>ID: {aid}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    with row_r:
+                        if status == "active":
+                            if st.button("▶ Resume", key=f"resume_{aid}", use_container_width=True):
+                                try:
+                                    resume_auction(aid)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Could not resume: {e}")
+                        elif status == "completed":
+                            if st.button("📊 View report", key=f"report_{aid}", use_container_width=True):
+                                st.session_state.report_auction_id = aid
+                                st.session_state.page = "report"
+                                st.rerun()
+                        else:
+                            st.caption(f"_{status}_")
                     st.divider()
 
 
@@ -584,14 +708,26 @@ elif st.session_state.page == "setup":
                         "rtm_remaining": int(rtm_count) if rtm_enabled else 0,
                     }
 
-                player_rows = [
-                    (str(r["player_name"]), str(r["set"]), r["base_price"])
-                    for r in df_preview.to_dict("records")
-                ]
+                # Player order is shuffled per-set at setup; persist the ordering
+                # so a Resume rebuilds the same queue we ran in-memory.
+                set_order = list(df_preview["set"].unique())
+                player_rows = []
+                set_players_buf: dict = {}
+                oi = 0
+                for s in set_order:
+                    bucket = df_preview[df_preview["set"] == s].to_dict("records")
+                    random.shuffle(bucket)
+                    set_players_buf[s] = bucket
+                    for p in bucket:
+                        player_rows.append(
+                            (str(p["player_name"]), str(s), p["base_price"], oi)
+                        )
+                        oi += 1
                 enqueue(add_auction_players, auction_id, player_rows)
                 invalidate_auctions_cache()
 
-                # hydrate session state for auction flow
+                # hydrate session state for auction flow — reuse the shuffled
+                # set_players_buf built above so in-memory order matches DB
                 st.session_state.auction_id = auction_id
                 st.session_state.teams = teams_state
                 st.session_state.players_df = df_preview
@@ -599,15 +735,14 @@ elif st.session_state.page == "setup":
                 st.session_state.purse = int(purse)
                 st.session_state.rtm_enabled = bool(rtm_enabled)
                 st.session_state.rtm_count = int(rtm_count) if rtm_enabled else 0
-                st.session_state.bid = 5
+                st.session_state.bid = 0
 
-                set_order = list(df_preview["set"].unique())
                 st.session_state.set_order = set_order
                 st.session_state.current_set_idx = 0
+                st.session_state.set_players = {}
+                st.session_state.set_index = {}
                 for s in set_order:
-                    players = df_preview[df_preview["set"] == s].to_dict("records")
-                    random.shuffle(players)
-                    st.session_state.set_players[s] = players
+                    st.session_state.set_players[s] = set_players_buf[s]
                     st.session_state.set_index[s] = 0
 
                 st.session_state.page = "auction"
@@ -966,6 +1101,170 @@ elif st.session_state.page == "trade":
     if st.button("Finish Trade"):
         st.session_state.page = "summary"
         st.rerun()
+
+
+# =========================================================
+# REPORT (read-only view of a completed auction)
+# =========================================================
+elif st.session_state.page == "report":
+    aid = st.session_state.get("report_auction_id")
+    if not aid:
+        st.error("No auction selected.")
+        if st.button("Back to Home"):
+            st.session_state.page = "home"
+            st.rerun()
+        st.stop()
+
+    try:
+        snap = _load_auction_from_db(aid)
+    except Exception as e:
+        st.error(f"Could not load auction: {e}")
+        if st.button("Back to Home"):
+            st.session_state.page = "home"
+            st.rerun()
+        st.stop()
+
+    a = snap["auction"]
+    teams = snap["teams"]
+    results = snap["results"]
+
+    header_l, header_r = st.columns([4, 1])
+    with header_l:
+        st.title(a.get("name") or "Auction Report")
+        dt = a["auction_datetime"].strftime("%Y-%m-%d %H:%M") if a.get("auction_datetime") else ""
+        st.caption(
+            f"{dt} · status: {a['status']} · purse: ₹{a['purse']} · "
+            f"players/team (min): {a['players_per_team']} · "
+            f"RTM: {'on' if a['rtm_enabled'] else 'off'}"
+        )
+        st.markdown(f"<div class='auction-id'>ID: {aid}</div>", unsafe_allow_html=True)
+    with header_r:
+        if st.button("← Back to Home", key="report_home"):
+            st.session_state.page = "home"
+            st.session_state.report_auction_id = None
+            st.rerun()
+
+    total_sold = len(results)
+    total_spend = sum(r["sold_price"] for r in results)
+    max_player = max(results, key=lambda r: r["sold_price"]) if results else None
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Players sold", total_sold)
+    m2.metric("Total spend", f"₹{total_spend}")
+    m3.metric("Teams", len(teams))
+    if max_player:
+        m4.metric(
+            "Top buy",
+            f"₹{max_player['sold_price']}",
+            delta=f"{max_player['player_name']} → {max_player['team_name']}",
+            delta_color="off",
+        )
+
+    st.divider()
+    st.subheader("Teams")
+
+    # Reuse the card renderer from the auction page — but we're outside that
+    # elif block so define a thin local version for the report.
+    def _report_card(name: str, data: dict, min_players: int) -> str:
+        bought = len(data["players"])
+        pct = min(100, int(round(100 * bought / max(1, min_players))))
+        over = bought > min_players
+        safe_name = html.escape(name)
+        safe_cap = html.escape(data.get("captain") or "—")
+        bg = data["color"]
+        fg = data.get("text_color") or "#ffffff"
+
+        if data["players"]:
+            rows = []
+            for p in sorted(data["players"], key=lambda x: -x["sold"]):
+                tag = "<span class='rtm-tag'>RTM</span>" if p.get("is_rtm") else ""
+                rows.append(
+                    f"<div class='player-row'>"
+                    f"<div class='player-cell-name'>{html.escape(str(p['player']))}{tag}</div>"
+                    f"<div class='player-cell-price{' rtm' if p.get('is_rtm') else ''}'>₹{p['sold']}</div>"
+                    f"</div>"
+                )
+            player_html = f"<div class='player-list' style='max-height:none;'>{''.join(rows)}</div>"
+        else:
+            player_html = "<div class='empty-squad'>No players</div>"
+
+        min_hint = f"min {min_players}" if not over else f"+{bought - min_players} over min"
+        spent = int(a["purse"]) - int(data["purse"])
+        return (
+            f"<div class='team-card'>"
+            f"<div class='team-card-header' style='background:{bg}; color:{fg};'>"
+            f"<div class='team-card-title'>{safe_name}</div>"
+            f"<div class='team-card-captain'>Captain: {safe_cap}</div>"
+            f"</div>"
+            f"<div class='team-card-body'>"
+            f"<div class='purse-row'>"
+            f"<div><div class='micro-label'>Spent</div><div class='team-purse'>₹{spent}</div></div>"
+            f"<div><div class='micro-label' style='text-align:right;'>Remaining</div>"
+            f"<div class='team-squad' style='color:#065f46;'>₹{data['purse']}</div></div>"
+            f"</div>"
+            f"<div class='purse-row' style='margin-top:0.6rem;'>"
+            f"<div><div class='micro-label'>Squad</div><div class='team-squad'>{bought}/{min_players}"
+            f"<span class='squad-hint'>{min_hint}</span></div></div>"
+            f"</div>"
+            f"<div class='progress-bar'>"
+            f"<div class='progress-bar-fill{' over' if over else ''}' style='width:{pct}%'></div>"
+            f"</div>"
+            f"{player_html}"
+            f"</div>"
+            f"</div>"
+        )
+
+    n = len(teams)
+    cols_per_row = 3 if n <= 9 else 4 if n <= 12 else 5
+    team_items = list(teams.items())
+    for row_start in range(0, n, cols_per_row):
+        row = team_items[row_start:row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for i, (name, data) in enumerate(row):
+            with cols[i]:
+                st.markdown(
+                    _report_card(name, data, int(a["players_per_team"])),
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+    st.subheader("All sales")
+    if results:
+        sales_df = pd.DataFrame(
+            [
+                {
+                    "Player": r["player_name"],
+                    "Set": r["set_name"],
+                    "Base": r["base_price"],
+                    "Sold to": r["team_name"],
+                    "Price": r["sold_price"],
+                    "RTM": "✓" if r["is_rtm"] else "",
+                    "Time": r["created_at"].strftime("%H:%M:%S") if r.get("created_at") else "",
+                }
+                for r in results
+            ]
+        )
+        st.dataframe(sales_df, use_container_width=True, hide_index=True)
+
+        # Downloadable Excel, one sheet per team + a summary
+        def export_report():
+            output = BytesIO()
+            with pd.ExcelWriter(output) as writer:
+                sales_df.to_excel(writer, sheet_name="All sales", index=False)
+                for tname, tdata in teams.items():
+                    if tdata["players"]:
+                        pd.DataFrame(tdata["players"]).to_excel(
+                            writer, sheet_name=tname[:30], index=False
+                        )
+            return output.getvalue()
+
+        st.download_button(
+            "⬇ Download report (xlsx)",
+            export_report(),
+            file_name=f"auction-{aid[:8]}.xlsx",
+        )
+    else:
+        st.caption("No sales recorded.")
 
 
 # =========================================================

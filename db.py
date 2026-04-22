@@ -54,8 +54,11 @@ CREATE TABLE IF NOT EXISTS auction_players (
     auction_id UUID REFERENCES auctions(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     set_name TEXT,
-    base_price INT NOT NULL
+    base_price INT NOT NULL,
+    order_index INT
 );
+
+ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS order_index INT;
 
 CREATE TABLE IF NOT EXISTS auction_results (
     id SERIAL PRIMARY KEY,
@@ -173,12 +176,12 @@ def add_auction_team(auction_id: str, team_id: int, purse: int, rtm_remaining: i
 
 
 def add_auction_players(auction_id: str, rows) -> None:
-    # rows: iterable of (name, set_name, base_price)
+    # rows: iterable of (name, set_name, base_price, order_index)
     with get_cursor(dict_cursor=False) as cur:
         psycopg2.extras.execute_values(
             cur,
-            "INSERT INTO auction_players (auction_id, name, set_name, base_price) VALUES %s",
-            [(auction_id, n, s, int(b)) for (n, s, b) in rows],
+            "INSERT INTO auction_players (auction_id, name, set_name, base_price, order_index) VALUES %s",
+            [(auction_id, n, s, int(b), int(oi)) for (n, s, b, oi) in rows],
         )
 
 
@@ -191,6 +194,65 @@ def list_auctions():
     with get_cursor() as cur:
         cur.execute(
             "SELECT id, name, auction_datetime, status FROM auctions ORDER BY auction_datetime DESC LIMIT 50"
+        )
+        return cur.fetchall()
+
+
+def get_auction(auction_id: str):
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT id, name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count, status "
+            "FROM auctions WHERE id = %s",
+            (auction_id,),
+        )
+        return cur.fetchone()
+
+
+def get_auction_teams_full(auction_id: str):
+    """Join auction_teams with teams_master so we have everything needed to render."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT at.team_id, at.remaining_purse, at.rtm_remaining,
+                   tm.name, tm.captain, tm.color, tm.text_color
+            FROM auction_teams at
+            JOIN teams_master tm ON tm.id = at.team_id
+            WHERE at.auction_id = %s
+            ORDER BY tm.name
+            """,
+            (auction_id,),
+        )
+        return cur.fetchall()
+
+
+def get_auction_players_ordered(auction_id: str):
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, set_name, base_price, order_index
+            FROM auction_players
+            WHERE auction_id = %s
+            ORDER BY COALESCE(order_index, id)
+            """,
+            (auction_id,),
+        )
+        return cur.fetchall()
+
+
+def get_auction_results_detailed(auction_id: str):
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT ar.id, ar.team_id, ar.sold_price, ar.is_rtm, ar.created_at,
+                   ap.name AS player_name, ap.set_name, ap.base_price,
+                   tm.name AS team_name
+            FROM auction_results ar
+            JOIN auction_players ap ON ap.id = ar.player_id
+            JOIN teams_master tm ON tm.id = ar.team_id
+            WHERE ar.auction_id = %s
+            ORDER BY ar.created_at, ar.id
+            """,
+            (auction_id,),
         )
         return cur.fetchall()
 
