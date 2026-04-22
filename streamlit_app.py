@@ -1534,7 +1534,13 @@ elif st.session_state.page == "setup":
         auction_date = st.date_input("Auction Date", value=date.today())
     with b2:
         auction_time = st.time_input("Auction Time", value=time(19, 0))
-        players_per_team = st.number_input("Players per Team", 1, 20, 11)
+        players_per_team = st.number_input(
+            "Players per Team (minimum)",
+            1,
+            20,
+            11,
+            help="Minimum squad size including the captain. Teams can buy more players than this — they just can't buy fewer.",
+        )
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
