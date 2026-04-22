@@ -1,6 +1,0 @@
-{"ts": "2026-04-22T12:46:19+00:00", "type": "new_player", "player": "Prashant", "set": "1", "base": 5}
-{"ts": "2026-04-22T12:46:21+00:00", "type": "bid", "team": "Blood hawks", "amount": 5}
-{"ts": "2026-04-22T12:46:22+00:00", "type": "sell", "player": "Prashant", "team": "Blood hawks", "amount": 5}
-{"ts": "2026-04-22T12:46:22+00:00", "type": "new_player", "player": "Ankit", "set": "1", "base": 5}
-{"ts": "2026-04-22T12:46:34+00:00", "type": "bid", "team": "Maverick Wolves", "amount": 5}
-{"ts": "2026-04-22T12:46:39+00:00", "type": "bid", "team": "Blood hawks", "amount": 7}

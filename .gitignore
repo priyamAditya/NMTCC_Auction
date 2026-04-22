@@ -1,5 +1,8 @@
 .streamlit/secrets.toml
 
+# Local event log (one JSONL per auction) — not synced anywhere
+data/events/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
