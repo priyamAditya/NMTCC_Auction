@@ -107,6 +107,23 @@ elif st.session_state.page == "setup":
             st.session_state.page = "auction"
 
         st.rerun()
+
+
+# =========================================================
+# RTM SETUP
+# =========================================================
+elif st.session_state.page == "rtm":
+
+    st.title("RTM Setup")
+
+    count = st.number_input("RTMs per Team", 0, 5, 2)
+
+    if st.button("Proceed"):
+        st.session_state.rtm_count = count
+        st.session_state.rtm_remaining = {t: count for t in st.session_state.teams}
+        st.session_state.page = "auction"
+        st.rerun()
+
 # =========================================================
 # AUCTION
 # =========================================================
