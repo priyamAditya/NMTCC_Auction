@@ -335,7 +335,7 @@ elif st.session_state.page == "trade":
 
     teams = list(st.session_state.teams.keys())
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         t1 = st.selectbox("Team 1", teams)
@@ -344,6 +344,10 @@ elif st.session_state.page == "trade":
     with col2:
         t2 = st.selectbox("Team 2", teams)
         st.dataframe(pd.DataFrame(st.session_state.teams[t2]["players"]))
+
+    with col3:
+        t3 = st.selectbox("Team 3", teams)
+        st.dataframe(pd.DataFrame(st.session_state.teams[t3]["players"]))
 
     if st.button("Finish Trade"):
         st.session_state.page = "summary"
