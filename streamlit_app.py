@@ -24,6 +24,7 @@ from db import (
     create_auction,
     create_master_team,
     create_player,
+    create_tournament,
     get_auction,
     get_auction_players_ordered,
     get_auction_results_detailed,
@@ -32,10 +33,14 @@ from db import (
     get_player,
     get_player_auctions,
     get_team_auctions,
+    get_tournament,
+    get_tournament_by_name,
     init_schema,
     list_auctions,
     list_master_teams,
     list_players,
+    list_tournament_auctions,
+    list_tournaments,
     record_captain_enrollment,
     record_sale,
     update_auction_status,
@@ -44,6 +49,10 @@ from db import (
     update_master_team_logo,
     update_player,
     update_player_photo,
+    update_player_team,
+    update_tournament,
+    update_tournament_banner,
+    update_tournament_logo,
 )
 from logos import avatar_html, logo_data_uri, process_uploaded_logo
 from event_log import log_event, read_events
@@ -306,6 +315,32 @@ st.markdown(
         padding: 0.05rem 0.4rem; border-radius: 4px; margin-left: 0.4rem;
         font-weight: 700; letter-spacing: 0.5px;
     }
+    .traded-tag {
+        font-size: 0.65rem; background: #dbeafe; color: #1d4ed8;
+        padding: 0.05rem 0.4rem; border-radius: 4px; margin-left: 0.4rem;
+        font-weight: 700; letter-spacing: 0.5px;
+    }
+
+    /* Trade panel */
+    .trade-card {
+        border: 2px solid #e5e7eb; border-radius: 12px; padding: 0.9rem 1.1rem;
+        margin-bottom: 0.7rem; background: white;
+    }
+    .trade-line {
+        display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center;
+        margin: 0.3rem 0;
+    }
+    .trade-team-tag {
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        padding: 0.25rem 0.7rem; border-radius: 999px;
+        font-weight: 700; font-size: 0.9rem;
+    }
+    .trade-player-chip {
+        display: inline-block; padding: 0.2rem 0.6rem;
+        background: #f1f5f9; color: #334155; border-radius: 999px;
+        font-size: 0.85rem; font-weight: 600;
+    }
+    .trade-arrow { font-size: 1.2rem; color: #94a3b8; }
     .empty-squad {
         text-align: center; padding: 1.1rem 0.5rem; color: #94a3b8;
         font-style: italic; font-size: 0.85rem;
@@ -447,6 +482,24 @@ def cached_all_players():
 
 def invalidate_players_cache():
     cached_all_players.clear()
+
+
+def _tournament_row_to_bytes(row: dict) -> dict:
+    d = dict(row)
+    for k in ("logo", "banner"):
+        v = d.get(k)
+        if isinstance(v, memoryview):
+            d[k] = bytes(v)
+    return d
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_tournaments():
+    return [_tournament_row_to_bytes(r) for r in list_tournaments()]
+
+
+def invalidate_tournaments_cache():
+    cached_tournaments.clear()
 
 
 @st.cache_data(ttl=15, show_spinner=False)
@@ -669,6 +722,8 @@ defaults = {
     "setup_player_sets": {},  # player_id -> set (int)
     "setup_random_in_set": False,
     "setup_player_sel_state": {},  # player_id -> {"selected": bool, "set": int}
+    # Trade window: pending + resolved trade proposals in this session
+    "trades": [],  # list of {id, from_team, to_team, give, take, status, created_at}
     # Report
     "report_auction_id": None,
     # Bid ladder for the currently running auction
@@ -755,9 +810,21 @@ if st.query_params.get("page") == "register":
 # =========================================================
 # AUTH GATE
 # =========================================================
-# Restore session from cookie if present + valid
+# extra_streamlit_components.CookieManager uses a JS bridge that's empty on
+# the very first rerun of a fresh page load. .get() returning None there
+# would drop us onto the login page even though a valid cookie exists.
+# .get_all() forces a round-trip; when it hasn't completed yet it returns
+# None — we stop rendering until the component triggers its rerun so the
+# cookie is actually available before we decide on auth.
+_all_cookies = cookie_mgr.get_all()
+if _all_cookies is None:
+    # Component mounting — don't flash the login page.
+    with st.spinner("Loading session…"):
+        pass
+    st.stop()
+
 if not st.session_state.authenticated:
-    existing_token = cookie_mgr.get(AUTH_COOKIE)
+    existing_token = _all_cookies.get(AUTH_COOKIE)
     if existing_token:
         _user = lookup_session(existing_token)
         if _user:
@@ -1463,7 +1530,7 @@ elif st.session_state.page == "setup":
     st.subheader("1 · Tournament Basics")
     b1, b2 = st.columns(2)
     with b1:
-        auction_name = st.text_input("Auction Name", placeholder="Flamingo Cup S1 P2")
+        auction_name = st.text_input("Auction Name *", placeholder="Flamingo Cup S1 P2")
         auction_date = st.date_input("Auction Date", value=date.today())
     with b2:
         auction_time = st.time_input("Auction Time", value=time(19, 0))
@@ -1714,6 +1781,8 @@ elif st.session_state.page == "setup":
     with nav_r:
         if st.button("Next → Pick players", type="primary", use_container_width=True):
             errors = []
+            if not auction_name.strip():
+                errors.append("Auction name is required")
             if len(st.session_state.setup_selected_teams) < 2:
                 errors.append("Add at least 2 teams")
             if len(st.session_state.setup_selected_teams) > 15:
@@ -1726,7 +1795,7 @@ elif st.session_state.page == "setup":
             else:
                 # Stash the screen-1 state for the player-selection screen.
                 st.session_state.setup_draft = {
-                    "name": auction_name.strip() or None,
+                    "name": auction_name.strip(),
                     "date": auction_date,
                     "time": auction_time,
                     "players_per_team": int(players_per_team),
@@ -2768,7 +2837,18 @@ elif st.session_state.page == "auction":
                 elif etype == "new_player":
                     body = f"New player: <b>{html.escape(ev.get('player',''))}</b> (set {html.escape(str(ev.get('set','')))}, base {fmt_money(ev.get('base',0))})"
                 elif etype in ("trade_proposed", "trade_accepted", "trade_rejected"):
-                    body = f"Trade {etype.split('_')[1]}: <b>{html.escape(ev.get('team_a',''))}</b> ↔ <b>{html.escape(ev.get('team_b',''))}</b>"
+                    verb = etype.split("_")[1]
+                    give_names = ", ".join(ev.get("give") or []) or (ev.get("player_a") or "")
+                    take_names = ", ".join(ev.get("take") or []) or (ev.get("player_b") or "")
+                    take_html = (
+                        f" ↔ <b>{html.escape(ev.get('to_team', ev.get('team_b','')))}</b> ({html.escape(take_names)})"
+                        if take_names
+                        else f" → <b>{html.escape(ev.get('to_team', ev.get('team_b','')))}</b> (transfer)"
+                    )
+                    body = (
+                        f"Trade {verb}: <b>{html.escape(ev.get('from_team', ev.get('team_a','')))}</b>"
+                        f" ({html.escape(give_names)}){take_html}"
+                    )
                 elif etype == "unsold":
                     phase_tag = " (bucket)" if ev.get("phase") == "unsold" else ""
                     body = f"<b>{html.escape(ev.get('player',''))}</b> unsold{phase_tag}"
@@ -2800,57 +2880,277 @@ elif st.session_state.page == "auction":
 
 
 # =========================================================
-# TRADE WINDOW
+# TRADE WINDOW — multi-player trades + simple transfers
 # =========================================================
 elif st.session_state.page == "trade":
     st.title("Trade Window")
-    teams = list(st.session_state.teams.keys())
-    col1, col2 = st.columns(2)
-    with col1:
-        t1 = st.selectbox("Team 1", teams)
-        st.dataframe(pd.DataFrame(st.session_state.teams[t1]["players"]))
-    with col2:
-        t2 = st.selectbox("Team 2", teams)
-        st.dataframe(pd.DataFrame(st.session_state.teams[t2]["players"]))
+    st.caption(
+        "Propose any number of trades between teams. A trade can move multiple "
+        "players each way, or be a one-way transfer with no return."
+    )
 
-    p1 = st.selectbox("Player Team 1", [p["player"] for p in st.session_state.teams[t1]["players"]])
-    p2 = st.selectbox("Player Team 2", [p["player"] for p in st.session_state.teams[t2]["players"]])
+    teams_state = st.session_state.teams
+    team_names = list(teams_state.keys())
 
-    trade_cols = st.columns(3)
-    with trade_cols[0]:
-        if st.button("Propose Trade", key="trade_propose"):
-            log_event(
-                st.session_state.auction_id,
-                "trade_proposed",
-                team_a=t1, team_b=t2, player_a=p1, player_b=p2,
-            )
-            st.info(f"Proposed: {p1} ↔ {p2}")
-    with trade_cols[1]:
-        if st.button("Accept Trade", key="trade_accept", type="primary"):
-            team1 = st.session_state.teams[t1]["players"]
-            team2 = st.session_state.teams[t2]["players"]
-            player1 = next(p for p in team1 if p["player"] == p1)
-            player2 = next(p for p in team2 if p["player"] == p2)
-            team1.remove(player1)
-            team2.remove(player2)
-            team1.append(player2)
-            team2.append(player1)
-            log_event(
-                st.session_state.auction_id,
-                "trade_accepted",
-                team_a=t1, team_b=t2, player_a=p1, player_b=p2,
-            )
-            st.success("Trade Completed")
-    with trade_cols[2]:
-        if st.button("Reject Trade", key="trade_reject"):
-            log_event(
-                st.session_state.auction_id,
-                "trade_rejected",
-                team_a=t1, team_b=t2, player_a=p1, player_b=p2,
-            )
-            st.warning("Trade rejected")
+    # ---- Helpers local to this page ----
+    def _trade_card_html(tname: str) -> str:
+        data = teams_state[tname]
+        bg = data["color"]
+        fg = data.get("text_color") or "#ffffff"
+        avatar = avatar_html(tname, data.get("logo"), data.get("logo_mime"), bg, fg, size_px=42)
+        safe_name = html.escape(tname)
+        safe_cap = html.escape(data.get("captain") or "—")
 
-    if st.button("Finish Trade"):
+        non_cap = [p for p in data["players"] if not p.get("is_captain")]
+        if non_cap:
+            rows = []
+            for p in non_cap:
+                tags = []
+                if p.get("is_rtm"):
+                    tags.append("<span class='rtm-tag'>RTM</span>")
+                if p.get("is_traded"):
+                    tags.append("<span class='traded-tag'>↔ TRADED</span>")
+                tag_html = " ".join(tags)
+                prefix = f"{tag_html} " if tag_html else ""
+                rows.append(
+                    f"<div class='player-row'>"
+                    f"<div class='player-cell-name'>{prefix}{html.escape(str(p['player']))}</div>"
+                    f"<div class='player-cell-price{' rtm' if p.get('is_rtm') else ''}'>{fmt_money(p['sold'])}</div>"
+                    f"</div>"
+                )
+            player_html = f"<div class='player-list'>{''.join(rows)}</div>"
+        else:
+            player_html = "<div class='empty-squad'>No non-captain players</div>"
+
+        return (
+            f"<div class='team-card'>"
+            f"<div class='team-card-header' style='background:{bg}; color:{fg};'>"
+            f"<div style='display:flex; gap:0.7rem; align-items:center;'>"
+            f"{avatar}"
+            f"<div><div class='team-card-title'>{safe_name}</div>"
+            f"<div class='team-card-captain'>Captain: {safe_cap}</div></div>"
+            f"</div></div>"
+            f"<div class='team-card-body'>{player_html}</div>"
+            f"</div>"
+        )
+
+    def _team_pill(tname: str) -> str:
+        data = teams_state[tname]
+        bg = data["color"]
+        fg = data.get("text_color") or "#ffffff"
+        return (
+            f"<span class='trade-team-tag' style='background:{bg}; color:{fg};'>"
+            f"{html.escape(tname)}</span>"
+        )
+
+    def _player_chip(name: str) -> str:
+        return f"<span class='trade-player-chip'>{html.escape(name)}</span>"
+
+    def _team_of(player_name: str) -> str | None:
+        for tname, tdata in teams_state.items():
+            for p in tdata["players"]:
+                if not p.get("is_captain") and p["player"] == player_name:
+                    return tname
+        return None
+
+    def _execute_trade(trade: dict) -> None:
+        from_name = trade["from_team"]
+        to_name = trade["to_team"]
+        from_players = teams_state[from_name]["players"]
+        to_players = teams_state[to_name]["players"]
+        from_id = teams_state[from_name]["team_id"]
+        to_id = teams_state[to_name]["team_id"]
+
+        for name in trade["give"]:
+            p = next((pl for pl in from_players if pl["player"] == name), None)
+            if p:
+                from_players.remove(p)
+                p["is_traded"] = True
+                to_players.append(p)
+                enqueue(update_player_team, st.session_state.auction_id, name, to_id)
+        for name in trade["take"]:
+            p = next((pl for pl in to_players if pl["player"] == name), None)
+            if p:
+                to_players.remove(p)
+                p["is_traded"] = True
+                from_players.append(p)
+                enqueue(update_player_team, st.session_state.auction_id, name, from_id)
+
+    # ---- All teams grid ----
+    st.subheader("All teams")
+    n_teams = len(team_names)
+    cols_per_row = 3 if n_teams <= 9 else 4 if n_teams <= 12 else 5
+    for row_start in range(0, n_teams, cols_per_row):
+        row_names = team_names[row_start:row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for i, tname in enumerate(row_names):
+            with cols[i]:
+                st.markdown(_trade_card_html(tname), unsafe_allow_html=True)
+
+    st.divider()
+
+    # ---- Propose trade ----
+    st.subheader("Propose a trade")
+
+    # Build search list of all tradable players (exclude captains)
+    all_players_labels: dict[str, str] = {}
+    for tname, tdata in teams_state.items():
+        for p in tdata["players"]:
+            if p.get("is_captain"):
+                continue
+            all_players_labels[p["player"]] = f"{p['player']} — {tname} ({fmt_money(p['sold'])})"
+
+    prop_a, prop_b = st.columns(2)
+    with prop_a:
+        offered = st.multiselect(
+            "Offered players (one team)",
+            options=list(all_players_labels.keys()),
+            format_func=lambda n: all_players_labels.get(n, n),
+            key="trade_offered",
+        )
+    with prop_b:
+        remaining = [n for n in all_players_labels if n not in offered]
+        wanted = st.multiselect(
+            "Wanted players (one other team — leave empty for a transfer)",
+            options=remaining,
+            format_func=lambda n: all_players_labels.get(n, n),
+            key="trade_wanted",
+        )
+
+    offered_teams = {t for t in (_team_of(n) for n in offered) if t}
+    wanted_teams = {t for t in (_team_of(n) for n in wanted) if t}
+
+    # If wanted is empty, ask for the recipient team
+    transfer_target = None
+    if offered and not wanted:
+        eligible = [t for t in team_names if t not in offered_teams]
+        transfer_target = st.selectbox(
+            "Transfer to",
+            options=eligible,
+            index=None,
+            placeholder="Pick the team receiving these players",
+            key="trade_transfer_target",
+        )
+
+    errors: list[str] = []
+    if not offered:
+        errors.append("Pick at least one offered player")
+    if len(offered_teams) > 1:
+        errors.append(
+            f"All offered players must be from ONE team (got {', '.join(sorted(offered_teams))})"
+        )
+    if len(wanted_teams) > 1:
+        errors.append(
+            f"All wanted players must be from ONE team (got {', '.join(sorted(wanted_teams))})"
+        )
+    if offered_teams and wanted_teams and offered_teams == wanted_teams:
+        errors.append("Offered and wanted players can't be from the same team")
+    if offered and not wanted and not transfer_target:
+        errors.append("Pick a recipient team for the transfer")
+
+    for e in errors:
+        st.warning(e)
+
+    if st.button(
+        "Propose trade",
+        type="primary",
+        disabled=bool(errors),
+        key="trade_propose_btn",
+    ):
+        from_team = next(iter(offered_teams))
+        to_team = next(iter(wanted_teams)) if wanted_teams else transfer_target
+        new_trade = {
+            "id": str(uuid.uuid4()),
+            "from_team": from_team,
+            "to_team": to_team,
+            "give": list(offered),
+            "take": list(wanted),
+            "status": "pending",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        st.session_state.trades.append(new_trade)
+        log_event(
+            st.session_state.auction_id,
+            "trade_proposed",
+            from_team=from_team,
+            to_team=to_team,
+            give=list(offered),
+            take=list(wanted),
+        )
+        # Reset selections
+        for k in ("trade_offered", "trade_wanted", "trade_transfer_target"):
+            if k in st.session_state:
+                del st.session_state[k]
+        st.toast(f"Trade proposed: {from_team} → {to_team}", icon="🤝")
+        st.rerun()
+
+    st.divider()
+
+    # ---- Pending trades ----
+    pending = [t for t in st.session_state.trades if t["status"] == "pending"]
+    st.subheader(f"Pending trades ({len(pending)})")
+    if not pending:
+        st.caption("No pending trades.")
+    for trade in pending:
+        with st.container(border=True):
+            give_chips = "".join(_player_chip(n) for n in trade["give"]) or "<i>(nothing)</i>"
+            take_chips = "".join(_player_chip(n) for n in trade["take"]) or "<i>(no return — transfer)</i>"
+            st.markdown(
+                f"<div class='trade-line'>"
+                f"{_team_pill(trade['from_team'])}"
+                f"<span class='trade-arrow'>gives</span>"
+                f"{give_chips}"
+                f"</div>"
+                f"<div class='trade-line'>"
+                f"{_team_pill(trade['to_team'])}"
+                f"<span class='trade-arrow'>gives</span>"
+                f"{take_chips}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            a, b, _sp = st.columns([1, 1, 4])
+            with a:
+                if st.button("✅ Accept", key=f"acc_{trade['id']}", type="primary", use_container_width=True):
+                    _execute_trade(trade)
+                    trade["status"] = "accepted"
+                    log_event(
+                        st.session_state.auction_id,
+                        "trade_accepted",
+                        from_team=trade["from_team"],
+                        to_team=trade["to_team"],
+                        give=trade["give"],
+                        take=trade["take"],
+                    )
+                    st.rerun()
+            with b:
+                if st.button("❌ Reject", key=f"rej_{trade['id']}", use_container_width=True):
+                    trade["status"] = "rejected"
+                    log_event(
+                        st.session_state.auction_id,
+                        "trade_rejected",
+                        from_team=trade["from_team"],
+                        to_team=trade["to_team"],
+                        give=trade["give"],
+                        take=trade["take"],
+                    )
+                    st.rerun()
+
+    # ---- Resolved (short summary) ----
+    resolved = [t for t in st.session_state.trades if t["status"] != "pending"]
+    if resolved:
+        with st.expander(f"History — {len(resolved)} resolved trade(s)"):
+            for t in reversed(resolved):
+                give_str = ", ".join(t["give"]) or "(nothing)"
+                take_str = ", ".join(t["take"]) or "(no return)"
+                status_tag = (
+                    "✅ accepted" if t["status"] == "accepted" else "❌ rejected"
+                )
+                st.markdown(
+                    f"- **{t['from_team']}** ({give_str}) ↔ **{t['to_team']}** ({take_str}) — {status_tag}"
+                )
+
+    st.divider()
+    if st.button("Finish Trades → Summary", type="primary"):
         st.session_state.page = "summary"
         st.rerun()
 
@@ -2896,9 +3196,15 @@ elif st.session_state.page == "report":
             st.session_state.report_auction_id = None
             st.rerun()
 
-    total_sold = len(results)
-    total_spend = sum(r["sold_price"] for r in results)
-    max_player = max(results, key=lambda r: r["sold_price"]) if results else None
+    # Captains are auto-enrolled at a placeholder value — not real sales
+    non_captain_results = [r for r in results if not r.get("is_captain")]
+    total_sold = len(non_captain_results)
+    total_spend = sum(r["sold_price"] for r in non_captain_results)
+    max_player = (
+        max(non_captain_results, key=lambda r: r["sold_price"])
+        if non_captain_results
+        else None
+    )
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Players sold", total_sold)

@@ -63,6 +63,17 @@ ALTER TABLE teams_master ADD COLUMN IF NOT EXISTS logo BYTEA;
 ALTER TABLE teams_master ADD COLUMN IF NOT EXISTS logo_mime TEXT;
 ALTER TABLE teams_master ADD COLUMN IF NOT EXISTS captain_id INT;
 
+CREATE TABLE IF NOT EXISTS tournaments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT UNIQUE NOT NULL,
+    logo BYTEA,
+    logo_mime TEXT,
+    banner BYTEA,
+    banner_mime TEXT,
+    link TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS auctions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT,
@@ -77,6 +88,7 @@ CREATE TABLE IF NOT EXISTS auctions (
 );
 
 ALTER TABLE auctions ADD COLUMN IF NOT EXISTS bid_tiers JSONB;
+ALTER TABLE auctions ADD COLUMN IF NOT EXISTS tournament_id UUID REFERENCES tournaments(id);
 
 CREATE TABLE IF NOT EXISTS auction_teams (
     auction_id UUID REFERENCES auctions(id) ON DELETE CASCADE,
@@ -385,6 +397,106 @@ def get_team_auctions(team_id: int):
         return cur.fetchall()
 
 
+# ---------- tournaments ----------
+
+_TOURNAMENT_COLS = "id, name, logo, logo_mime, banner, banner_mime, link, created_at"
+
+
+def list_tournaments():
+    with get_cursor() as cur:
+        cur.execute(f"SELECT {_TOURNAMENT_COLS} FROM tournaments ORDER BY name")
+        return cur.fetchall()
+
+
+def get_tournament(tournament_id: str):
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT {_TOURNAMENT_COLS} FROM tournaments WHERE id = %s",
+            (tournament_id,),
+        )
+        return cur.fetchone()
+
+
+def get_tournament_by_name(name: str):
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT {_TOURNAMENT_COLS} FROM tournaments WHERE LOWER(name) = LOWER(%s)",
+            (name,),
+        )
+        return cur.fetchone()
+
+
+def create_tournament(name: str, link: str | None = None) -> str:
+    nn = (name or "").strip()
+    if not nn:
+        raise ValueError("Tournament name required")
+    existing = get_tournament_by_name(nn)
+    if existing:
+        raise ValueError(f"Tournament '{nn}' already exists")
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO tournaments (name, link) VALUES (%s, %s) RETURNING id",
+            (nn, (link or "").strip() or None),
+        )
+        return str(cur.fetchone()["id"])
+
+
+def update_tournament(tournament_id: str, name: str, link: str | None) -> None:
+    nn = (name or "").strip()
+    if not nn:
+        raise ValueError("Tournament name required")
+    # Enforce uniqueness excluding this id
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM tournaments WHERE LOWER(name) = LOWER(%s) AND id <> %s",
+            (nn, tournament_id),
+        )
+        if cur.fetchone():
+            raise ValueError(f"Another tournament is already named '{nn}'")
+        cur.execute(
+            "UPDATE tournaments SET name = %s, link = %s WHERE id = %s",
+            (nn, (link or "").strip() or None, tournament_id),
+        )
+
+
+def update_tournament_logo(tournament_id: str, logo_bytes, logo_mime: str | None) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE tournaments SET logo = %s, logo_mime = %s WHERE id = %s",
+            (
+                psycopg2.Binary(logo_bytes) if logo_bytes else None,
+                logo_mime if logo_bytes else None,
+                tournament_id,
+            ),
+        )
+
+
+def update_tournament_banner(tournament_id: str, banner_bytes, banner_mime: str | None) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE tournaments SET banner = %s, banner_mime = %s WHERE id = %s",
+            (
+                psycopg2.Binary(banner_bytes) if banner_bytes else None,
+                banner_mime if banner_bytes else None,
+                tournament_id,
+            ),
+        )
+
+
+def list_tournament_auctions(tournament_id: str):
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, auction_datetime, status, tournament_id
+            FROM auctions
+            WHERE tournament_id = %s
+            ORDER BY auction_datetime DESC
+            """,
+            (tournament_id,),
+        )
+        return cur.fetchall()
+
+
 # ---------- auctions ----------
 
 def create_auction(
@@ -396,16 +508,19 @@ def create_auction(
     rtm_enabled: bool,
     rtm_count: int,
     bid_tiers=None,
+    tournament_id: str | None = None,
 ) -> str:
     """Insert with a caller-supplied UUID so the UI doesn't block on this round-trip."""
     tiers_json = psycopg2.extras.Json(bid_tiers) if bid_tiers is not None else None
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO auctions (id, name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count, bid_tiers, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')
+            INSERT INTO auctions (id, name, auction_datetime, players_per_team, purse,
+                                  rtm_enabled, rtm_count, bid_tiers, tournament_id, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active')
             """,
-            (auction_id, name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count, tiers_json),
+            (auction_id, name, auction_datetime, players_per_team, purse,
+             rtm_enabled, rtm_count, tiers_json, tournament_id),
         )
         return auction_id
 
@@ -454,9 +569,17 @@ def update_auction_status(auction_id: str, status: str) -> None:
 
 
 def list_auctions():
+    """Return auctions with the tournament name (canonical) used as the display name."""
     with get_cursor() as cur:
         cur.execute(
-            "SELECT id, name, auction_datetime, status FROM auctions ORDER BY auction_datetime DESC LIMIT 50"
+            """
+            SELECT a.id, COALESCE(t.name, a.name) AS name,
+                   a.auction_datetime, a.status, a.tournament_id
+            FROM auctions a
+            LEFT JOIN tournaments t ON t.id = a.tournament_id
+            ORDER BY a.auction_datetime DESC
+            LIMIT 50
+            """
         )
         return cur.fetchall()
 
@@ -464,8 +587,17 @@ def list_auctions():
 def get_auction(auction_id: str):
     with get_cursor() as cur:
         cur.execute(
-            "SELECT id, name, auction_datetime, players_per_team, purse, rtm_enabled, rtm_count, status, bid_tiers "
-            "FROM auctions WHERE id = %s",
+            """
+            SELECT a.id, COALESCE(t.name, a.name) AS name, a.auction_datetime,
+                   a.players_per_team, a.purse, a.rtm_enabled, a.rtm_count,
+                   a.status, a.bid_tiers, a.tournament_id,
+                   t.logo AS tournament_logo, t.logo_mime AS tournament_logo_mime,
+                   t.banner AS tournament_banner, t.banner_mime AS tournament_banner_mime,
+                   t.link AS tournament_link
+            FROM auctions a
+            LEFT JOIN tournaments t ON t.id = a.tournament_id
+            WHERE a.id = %s
+            """,
             (auction_id,),
         )
         return cur.fetchone()
@@ -518,6 +650,23 @@ def get_auction_results_detailed(auction_id: str):
             (auction_id,),
         )
         return cur.fetchall()
+
+
+def update_player_team(auction_id: str, player_name: str, new_team_id: int) -> None:
+    """Move a player to a new team — used by trades. Updates ALL result rows
+    for that player in this auction. Purse is not touched."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE auction_results
+            SET team_id = %s
+            WHERE auction_id = %s AND player_id IN (
+                SELECT id FROM auction_players
+                WHERE auction_id = %s AND LOWER(name) = LOWER(%s)
+            )
+            """,
+            (new_team_id, auction_id, auction_id, player_name),
+        )
 
 
 def record_captain_enrollment(auction_id: str, captain_name: str, team_id: int, cap_value: int) -> None:
