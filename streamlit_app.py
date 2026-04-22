@@ -65,6 +65,42 @@ def step_for_bid(current_bid: int, tiers: list[dict]) -> int:
     return int(tiers[-1]["step"])
 
 
+ROLE_OPTIONS = ["Batsman", "Bowler", "All-rounder", "Wicket-keeper"]
+_ROLE_ALIASES = {
+    "batsman": "Batsman",
+    "batter": "Batsman",
+    "bowler": "Bowler",
+    "allrounder": "All-rounder",
+    "all-rounder": "All-rounder",
+    "all rounder": "All-rounder",
+    "keeper": "Wicket-keeper",
+    "wicket-keeper": "Wicket-keeper",
+    "wicketkeeper": "Wicket-keeper",
+    "wk": "Wicket-keeper",
+}
+
+
+def parse_roles(s):
+    """Split a comma-separated role string into canonical labels (dedup, order kept)."""
+    if not s:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in str(s).split(","):
+        p = part.strip().lower()
+        if not p:
+            continue
+        canon = _ROLE_ALIASES.get(p, part.strip())
+        if canon not in seen:
+            out.append(canon)
+            seen.add(canon)
+    return out
+
+
+def format_roles(roles) -> str:
+    return ", ".join(roles) if roles else ""
+
+
 def fmt_money(amount) -> str:
     """Format an amount stored in lakhs. 100L = 1Cr.
     100 -> '₹1Cr', 150 -> '₹1.5Cr', 225 -> '₹2.25Cr', 45 -> '₹45L'."""
@@ -139,6 +175,28 @@ st.markdown(
     .hero-player-role {
         font-size: 0.85rem; text-transform: uppercase; letter-spacing: 3px;
         color: #fbbf24; font-weight: 700; margin: 0.3rem 0 0.2rem 0;
+    }
+    .hero-role-chips { margin: 0.35rem 0 0.1rem 0; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .hero-role-chip {
+        background: rgba(251, 191, 36, 0.15); color: #fbbf24;
+        padding: 0.15rem 0.6rem; border-radius: 999px;
+        font-size: 0.72rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 2px;
+        border: 1px solid rgba(251,191,36,0.4);
+    }
+    .hero-notes {
+        margin-top: 0.6rem; background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+        padding: 0.35rem 0.7rem; font-size: 0.85rem;
+    }
+    .hero-notes summary {
+        cursor: pointer; color: rgba(255,255,255,0.85);
+        font-weight: 600; list-style: none;
+    }
+    .hero-notes summary::-webkit-details-marker { display: none; }
+    .hero-notes-body {
+        margin-top: 0.5rem; color: rgba(255,255,255,0.78);
+        line-height: 1.45;
     }
     .hero-player-meta {
         font-size: 0.95rem; opacity: 0.75; margin: 0.2rem 0 1rem 0;
@@ -447,6 +505,7 @@ def _load_auction_from_db(auction_id: str) -> dict:
                 "role": (master.get("role") if isinstance(master, dict) else None) or "",
                 "photo": master.get("photo") if isinstance(master, dict) else None,
                 "photo_mime": master.get("photo_mime") if isinstance(master, dict) else None,
+                "notes": (master.get("notes") if isinstance(master, dict) else None) or "",
             }
         )
 
@@ -647,10 +706,9 @@ if st.query_params.get("page") == "register":
                 r_mobile = st.text_input("Mobile *")
             with r_col2:
                 r_email = st.text_input("Email *")
-            r_role = st.selectbox(
-                "Role",
-                options=["", "Batsman", "Bowler", "All-rounder", "Wicket-keeper"],
-                index=0,
+            r_roles = st.multiselect(
+                "Role (pick all that apply)",
+                options=ROLE_OPTIONS,
             )
             r_dob = st.date_input("Date of birth", value=None)
             r_photo = st.file_uploader(
@@ -676,7 +734,7 @@ if st.query_params.get("page") == "register":
                             name=r_name,
                             mobile=r_mobile,
                             email=r_email,
-                            role=r_role or None,
+                            role=format_roles(r_roles) or None,
                             dob=r_dob,
                             notes=r_notes,
                         )
@@ -876,8 +934,9 @@ elif st.session_state.page == "players":
                         fg="#ffffff",
                         size_px=48,
                     )
+                    _roles = parse_roles(p.get("role") or "")
                     meta_bits = [
-                        f"Role: {html.escape(p['role'])}" if p.get("role") else None,
+                        f"Role: {html.escape(format_roles(_roles))}" if _roles else None,
                         f"📱 {html.escape(p['mobile'])}" if p.get("mobile") else None,
                         f"✉️ {html.escape(p['email'])}" if p.get("email") else None,
                     ]
@@ -895,15 +954,11 @@ elif st.session_state.page == "players":
                     with st.popover("⚙️ Edit", use_container_width=True):
                         pid = p["id"]
                         e_name = st.text_input("Name *", value=p["name"], key=f"p_name_{pid}")
-                        e_role = st.selectbox(
-                            "Role",
-                            options=["", "Batsman", "Bowler", "All-rounder", "Wicket-keeper"],
-                            index=(
-                                ["", "Batsman", "Bowler", "All-rounder", "Wicket-keeper"].index(p["role"])
-                                if p.get("role") in ["Batsman", "Bowler", "All-rounder", "Wicket-keeper"]
-                                else 0
-                            ),
-                            key=f"p_role_{pid}",
+                        e_roles = st.multiselect(
+                            "Role (pick all that apply)",
+                            options=ROLE_OPTIONS,
+                            default=parse_roles(p.get("role") or ""),
+                            key=f"p_roles_{pid}",
                         )
                         e_mob, e_eml = st.columns(2)
                         with e_mob:
@@ -941,7 +996,7 @@ elif st.session_state.page == "players":
                                     name=e_name,
                                     mobile=e_mobile,
                                     email=e_email,
-                                    role=e_role or None,
+                                    role=format_roles(e_roles) or None,
                                     dob=e_dob,
                                     notes=e_notes,
                                 )
@@ -994,10 +1049,9 @@ elif st.session_state.page == "players":
                 a_mobile = st.text_input("Mobile")
             with c2:
                 a_email = st.text_input("Email")
-            a_role = st.selectbox(
-                "Role",
-                options=["", "Batsman", "Bowler", "All-rounder", "Wicket-keeper"],
-                index=0,
+            a_roles = st.multiselect(
+                "Role (pick all that apply)",
+                options=ROLE_OPTIONS,
             )
             a_dob = st.date_input("Date of birth", value=None)
             a_photo = st.file_uploader(
@@ -1011,7 +1065,7 @@ elif st.session_state.page == "players":
                         name=a_name,
                         mobile=a_mobile,
                         email=a_email,
-                        role=a_role or None,
+                        role=format_roles(a_roles) or None,
                         dob=a_dob,
                         notes=a_notes,
                     )
@@ -1783,11 +1837,10 @@ elif st.session_state.page == "setup_players":
         with st.popover("➕ Add new player", use_container_width=True):
             st.caption("Creates a new entry in the player master. Mobile and email must be unique.")
             np_name = st.text_input("Name *", key="pool_np_name")
-            np_role = st.selectbox(
-                "Role",
-                options=["", "Batsman", "Bowler", "All-rounder", "Wicket-keeper"],
-                index=0,
-                key="pool_np_role",
+            np_roles = st.multiselect(
+                "Role (pick all that apply)",
+                options=ROLE_OPTIONS,
+                key="pool_np_roles",
             )
             np_m, np_e = st.columns(2)
             with np_m:
@@ -1805,7 +1858,7 @@ elif st.session_state.page == "setup_players":
                         name=np_name,
                         mobile=np_mobile,
                         email=np_email,
-                        role=np_role or None,
+                        role=format_roles(np_roles) or None,
                     )
                     if np_photo_upload is not None:
                         photo_bytes, photo_mime = process_uploaded_logo(np_photo_upload)
@@ -2057,6 +2110,7 @@ elif st.session_state.page == "setup_players":
                             "role": (players_by_name.get(row["name"]) or {}).get("role") or "",
                             "photo": (players_by_name.get(row["name"]) or {}).get("photo"),
                             "photo_mime": (players_by_name.get(row["name"]) or {}).get("photo_mime"),
+                            "notes": (players_by_name.get(row["name"]) or {}).get("notes") or "",
                         }
                         for row in bucket
                     ]
@@ -2416,33 +2470,47 @@ elif st.session_state.page == "auction":
     with left:
         player_photo = player.get("photo")
         player_photo_mime = player.get("photo_mime")
-        player_role = player.get("role") or ""
+        player_roles = parse_roles(player.get("role") or "")
+        player_notes = (player.get("notes") or "").strip()
         photo_uri = logo_data_uri(player_photo, player_photo_mime) if player_photo else None
         photo_html = (
-            f"<img src='{photo_uri}' style='width:90px; height:90px; border-radius:14px; "
+            f"<img src='{photo_uri}' style='width:96px; height:96px; border-radius:14px; "
             f"object-fit:cover; background:rgba(255,255,255,0.1); border:2px solid rgba(255,255,255,0.15);' />"
             if photo_uri
             else (
-                f"<div style='width:90px; height:90px; border-radius:14px; "
+                f"<div style='width:96px; height:96px; border-radius:14px; "
                 f"background:rgba(255,255,255,0.12); display:flex; align-items:center; "
                 f"justify-content:center; font-size:2rem; font-weight:800;'>"
                 f"{html.escape(str(player['player_name'])[:1].upper())}</div>"
             )
         )
-        role_html = (
-            f"<div class='hero-player-role'>{html.escape(player_role)}</div>"
-            if player_role
-            else ""
-        )
+        role_chips_html = ""
+        if player_roles:
+            role_chips_html = (
+                "<div class='hero-role-chips'>"
+                + "".join(
+                    f"<span class='hero-role-chip'>{html.escape(r)}</span>"
+                    for r in player_roles
+                )
+                + "</div>"
+            )
+        notes_html = ""
+        if player_notes:
+            notes_html = (
+                f"<details class='hero-notes'><summary>📝 Profile</summary>"
+                f"<div class='hero-notes-body'>{html.escape(player_notes).replace(chr(10), '<br>')}</div>"
+                f"</details>"
+            )
         st.markdown(
             f"""
             <div class='hero'>
               <div style='display:flex; gap:1.1rem; align-items:flex-start;'>
                 <div>{photo_html}</div>
-                <div style='flex:1;'>
+                <div style='flex:1; min-width:0;'>
                   <div class='hero-player-name'>{html.escape(str(player['player_name']))}</div>
-                  {role_html}
+                  {role_chips_html}
                   <div class='hero-player-meta'>Set: {html.escape(str(current_set))} · Base: {fmt_money(base_price)}</div>
+                  {notes_html}
                 </div>
               </div>
               <div class='hero-bid-label'>Current Bid</div>
