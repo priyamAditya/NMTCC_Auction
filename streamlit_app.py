@@ -1058,15 +1058,106 @@ elif st.session_state.page == "players":
 # TEAMS — master team management (edit + auction history)
 # =========================================================
 elif st.session_state.page == "teams":
-    top_l, top_r = st.columns([5, 1])
+    top_l, top_mid, top_r = st.columns([4, 1, 1])
     with top_l:
         st.title("Teams")
         st.caption("Edit saved teams and jump to any auction they've played.")
+    with top_mid:
+        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+        open_new = st.popover("➕ Add new team", use_container_width=True)
     with top_r:
         st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
         if st.button("← Home", key="teams_back_home", use_container_width=True):
             st.session_state.page = "home"
             st.rerun()
+
+    with open_new:
+        # Mirrors the setup-screen popover; saves straight to teams_master.
+        nt_name = st.text_input("Team Name", key="teams_nt_name")
+        _players = cached_all_players()
+        _label = {
+            p["id"]: p["name"] + (f" ({p['role']})" if p.get("role") else "")
+            for p in _players
+        }
+        if not _players:
+            st.warning("No players in the master list — register players first.")
+        nt_cap_id = st.selectbox(
+            "Captain (search — type any part of the name)",
+            options=[p["id"] for p in _players],
+            index=None,
+            placeholder="Type to search…",
+            format_func=lambda pid: _label.get(pid, "?"),
+            key="teams_nt_cap_id",
+        )
+        nt_captain_name = (
+            next((p["name"] for p in _players if p["id"] == nt_cap_id), "")
+            if nt_cap_id
+            else ""
+        )
+        nt_bg_col, nt_fg_col = st.columns(2)
+        with nt_bg_col:
+            nt_bg = st.color_picker("Background", value="#3b82f6", key="teams_nt_bg")
+        with nt_fg_col:
+            nt_fg = st.color_picker("Text Colour", value="#ffffff", key="teams_nt_fg")
+        nt_logo_upload = st.file_uploader(
+            "Logo (optional)",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="teams_nt_logo",
+        )
+        nt_logo_bytes = None
+        nt_logo_mime = None
+        if nt_logo_upload is not None:
+            try:
+                nt_logo_bytes, nt_logo_mime = process_uploaded_logo(nt_logo_upload)
+            except Exception as ex:
+                st.error(f"Could not read logo: {ex}")
+
+        # Live preview chip
+        preview_avatar = avatar_html(
+            nt_name.strip() or "T",
+            nt_logo_bytes,
+            nt_logo_mime,
+            nt_bg,
+            nt_fg,
+            size_px=40,
+        )
+        preview_label = (
+            (nt_name.strip() or "Team") + " · " + (nt_captain_name or "Captain")
+        )
+        st.markdown(
+            f"<div style='display:flex; align-items:center; gap:0.6rem; margin:0.4rem 0;'>"
+            f"{preview_avatar}"
+            f"<div style='padding:0.5rem 1rem; border-radius:999px; background:{nt_bg}; "
+            f"color:{nt_fg}; font-weight:600;'>{html.escape(preview_label)}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Save team", key="teams_nt_save", type="primary", use_container_width=True):
+            nn = nt_name.strip()
+            if not nn:
+                st.error("Team name required")
+            elif not nt_cap_id:
+                st.error("Pick a captain from the player list")
+            else:
+                existing = get_master_team_by_name(nn)
+                if existing:
+                    st.error(f"Team '{nn}' already exists")
+                else:
+                    try:
+                        team_id = create_master_team(
+                            nn, nt_captain_name, nt_bg, nt_fg, captain_id=int(nt_cap_id)
+                        )
+                        if nt_logo_bytes:
+                            update_master_team_logo(team_id, nt_logo_bytes, nt_logo_mime)
+                        invalidate_master_teams_cache()
+                        for k in ("teams_nt_name", "teams_nt_cap_id", "teams_nt_logo"):
+                            if k in st.session_state:
+                                del st.session_state[k]
+                        st.toast(f"Added team '{nn}'", icon="✅")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Could not save: {ex}")
 
     teams = cached_master_teams()
     if not teams:
@@ -1488,6 +1579,7 @@ elif st.session_state.page == "setup":
                         for k in ("new_team_name", "new_team_captain_id", "new_team_logo"):
                             if k in st.session_state:
                                 del st.session_state[k]
+                        st.toast(f"Added team '{nn}' with captain {new_captain}", icon="✅")
                         st.rerun()
 
     # Selected teams display — click a chip to remove it.
