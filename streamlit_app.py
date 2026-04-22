@@ -1750,6 +1750,79 @@ elif st.session_state.page == "setup_players":
 
     import pandas as _pd
 
+    # ----- Search + Add player ------
+    search_col, add_col = st.columns([3, 1])
+    with search_col:
+        q = st.text_input(
+            "Search players by name or role",
+            key="player_pool_search",
+            placeholder="Type any part of the name — e.g. 'Jash' or 'Shinde'",
+        )
+    with add_col:
+        st.markdown("<div style='height:1.6rem'></div>", unsafe_allow_html=True)
+        with st.popover("➕ Add new player", use_container_width=True):
+            st.caption("Creates a new entry in the player master. Mobile and email must be unique.")
+            np_name = st.text_input("Name *", key="pool_np_name")
+            np_role = st.selectbox(
+                "Role",
+                options=["", "Batsman", "Bowler", "All-rounder", "Wicket-keeper"],
+                index=0,
+                key="pool_np_role",
+            )
+            np_m, np_e = st.columns(2)
+            with np_m:
+                np_mobile = st.text_input("Mobile", key="pool_np_mobile")
+            with np_e:
+                np_email = st.text_input("Email", key="pool_np_email")
+            np_photo_upload = st.file_uploader(
+                "Photo (optional)",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="pool_np_photo",
+            )
+            if st.button("Save player", key="pool_np_save", type="primary", use_container_width=True):
+                try:
+                    pid = create_player(
+                        name=np_name,
+                        mobile=np_mobile,
+                        email=np_email,
+                        role=np_role or None,
+                    )
+                    if np_photo_upload is not None:
+                        photo_bytes, photo_mime = process_uploaded_logo(np_photo_upload)
+                        update_player_photo(pid, photo_bytes, photo_mime)
+                    invalidate_players_cache()
+                    for k in ("pool_np_name", "pool_np_mobile", "pool_np_email", "pool_np_photo"):
+                        if k in st.session_state:
+                            del st.session_state[k]
+                    st.toast(f"Added '{np_name.strip()}'", icon="✅")
+                    st.rerun()
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as ex:
+                    st.error(f"Could not save: {ex}")
+
+    q_lower = (q or "").strip().lower()
+
+    prev_q = st.session_state.get("_pool_last_q", "")
+    stash_key = "player_pool_last_df"
+    if q_lower != prev_q and stash_key in st.session_state:
+        prev_df = st.session_state[stash_key]
+        for _, row in prev_df.iterrows():
+            pid = int(row["id"])
+            if pid in sel_state:
+                sel_state[pid]["selected"] = bool(row["Pick"])
+                sel_state[pid]["set"] = int(row["Set"])
+    st.session_state._pool_last_q = q_lower
+
+    filtered_players = [
+        p for p in pool_players
+        if not q_lower
+        or q_lower in (p["name"] or "").lower()
+        or q_lower in (p.get("role") or "").lower()
+    ]
+
+    st.caption(f"Showing {len(filtered_players)} of {len(pool_players)} players")
+
     rows_for_editor = [
         {
             "id": int(p["id"]),
@@ -1758,7 +1831,7 @@ elif st.session_state.page == "setup_players":
             "Role": p.get("role") or "",
             "Set": int(sel_state[p["id"]]["set"]),
         }
-        for p in pool_players
+        for p in filtered_players
     ]
     pool_df = _pd.DataFrame(rows_for_editor)
 
@@ -1774,8 +1847,10 @@ elif st.session_state.page == "setup_players":
             "Set": st.column_config.NumberColumn(min_value=1, max_value=99, step=1),
         },
         height=460,
-        key="player_pool_editor",  # stable key — edits persist across reruns
+        key=f"player_pool_editor_{q_lower}",  # rebuild on search change
     )
+    # Remember this render's df so the next rerun can auto-commit if search changes
+    st.session_state[stash_key] = edited_df
 
     # Bulk helpers + Save button
     bulk_cols = st.columns([1, 1, 2, 2])
