@@ -1616,8 +1616,12 @@ elif st.session_state.page == "setup_players":
         type=["numericColumn", "numberColumnFilter"],
         minWidth=80,
     )
-    gb.configure_selection("multiple", use_checkbox=True, suppress_row_click_selection=True)
-    gb.configure_grid_options(rowDragManaged=True, animateRows=True)
+    gb.configure_selection("multiple", use_checkbox=True)
+    gb.configure_grid_options(
+        rowDragManaged=True,
+        animateRows=True,
+        suppressRowClickSelection=True,
+    )
     grid_options = gb.build()
 
     prev_selected = st.session_state.setup_selected_player_ids or []
