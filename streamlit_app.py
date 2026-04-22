@@ -653,6 +653,10 @@ if st.query_params.get("page") == "register":
                 index=0,
             )
             r_dob = st.date_input("Date of birth", value=None)
+            r_photo = st.file_uploader(
+                "Profile photo (optional)",
+                type=["png", "jpg", "jpeg", "webp"],
+            )
             r_notes = st.text_area("Anything else we should know?", placeholder="(optional)")
             submitted = st.form_submit_button("Register", type="primary", use_container_width=True)
             if submitted:
@@ -676,6 +680,12 @@ if st.query_params.get("page") == "register":
                             dob=r_dob,
                             notes=r_notes,
                         )
+                        if r_photo is not None:
+                            try:
+                                p_bytes, p_mime = process_uploaded_logo(r_photo)
+                                update_player_photo(pid, p_bytes, p_mime)
+                            except Exception as _pe:
+                                st.warning(f"Registered, but photo could not be saved: {_pe}")
                         st.success(f"Registered! Your player ID is {pid}.")
                     except ValueError as ve:
                         st.error(str(ve))
@@ -990,6 +1000,10 @@ elif st.session_state.page == "players":
                 index=0,
             )
             a_dob = st.date_input("Date of birth", value=None)
+            a_photo = st.file_uploader(
+                "Photo (optional)",
+                type=["png", "jpg", "jpeg", "webp"],
+            )
             a_notes = st.text_area("Notes")
             if st.form_submit_button("Add player", type="primary"):
                 try:
@@ -1001,6 +1015,12 @@ elif st.session_state.page == "players":
                         dob=a_dob,
                         notes=a_notes,
                     )
+                    if a_photo is not None:
+                        try:
+                            p_bytes, p_mime = process_uploaded_logo(a_photo)
+                            update_player_photo(pid, p_bytes, p_mime)
+                        except Exception as _pe:
+                            st.warning(f"Added, but photo could not be saved: {_pe}")
                     invalidate_players_cache()
                     st.success(f"Added player (id: {pid})")
                     st.rerun()
