@@ -1,3 +1,9 @@
 streamlit
 pandas
 openpyxl
+psycopg2-binary
+bcrypt
+python-dotenv
+Pillow
+extra-streamlit-components
+streamlit-aggrid

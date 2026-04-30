@@ -1,5 +1,12 @@
 .streamlit/secrets.toml
 
+# Local event log (one JSONL per auction) — not synced anywhere
+data/events/
+
+# Private master sheets — seeded into Postgres, not for git
+Player Registration*.csv
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
