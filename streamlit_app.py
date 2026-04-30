@@ -1,5 +1,6 @@
 import html
 import random
+import time as _time
 import urllib.parse
 import uuid
 from datetime import date, datetime, time
@@ -41,6 +42,8 @@ from db import (
     list_players,
     list_tournament_auctions,
     list_tournaments,
+    mark_player_released,
+    mark_player_unsold,
     record_captain_enrollment,
     record_sale,
     update_auction_status,
@@ -578,7 +581,8 @@ def _load_auction_from_db(auction_id: str) -> dict:
         }
         team_id_to_name[t["team_id"]] = t["name"]
 
-    sold_per_set: dict[str, int] = {s: 0 for s in set_order}
+    # ---- Roster from auction_results ----
+    sold_names: set[str] = set()
     for r in result_rows:
         tname = team_id_to_name.get(r["team_id"])
         if not tname:
@@ -592,10 +596,43 @@ def _load_auction_from_db(auction_id: str) -> dict:
                 "is_captain": bool(r.get("is_captain")),
             }
         )
-        if r["set_name"] in sold_per_set:
-            sold_per_set[r["set_name"]] += 1
+        if not r.get("is_captain"):
+            sold_names.add((r["player_name"] or "").lower())
 
-    set_index = {s: min(sold_per_set.get(s, 0), len(set_players[s])) for s in set_order}
+    # ---- set_index + unsold bucket ----
+    # set_index[s] = number of players in set s that have been "passed" in main
+    # phase (either sold or marked unsold). This advances the queue past them.
+    # unsold_bucket = players where unsold=true, NOT sold, and NOT released.
+    set_index = {s: 0 for s in set_order}
+    unsold_bucket: list[dict] = []
+    for p in player_rows:
+        if p.get("is_captain"):
+            continue
+        name_lower = (p["name"] or "").lower()
+        is_sold = name_lower in sold_names
+        is_unsold = bool(p.get("unsold"))
+        is_released = bool(p.get("released"))
+        if is_sold or is_unsold:
+            if p["set_name"] in set_index:
+                set_index[p["set_name"]] += 1
+        if is_unsold and not is_sold and not is_released:
+            master = master_by_name.get(name_lower, {})
+            unsold_bucket.append(
+                {
+                    "player_name": p["name"],
+                    "set": p["set_name"],
+                    "base_price": p["base_price"],
+                    "role": (master.get("role") if isinstance(master, dict) else None) or "",
+                    "photo": master.get("photo") if isinstance(master, dict) else None,
+                    "photo_mime": master.get("photo_mime") if isinstance(master, dict) else None,
+                    "notes": (master.get("notes") if isinstance(master, dict) else None) or "",
+                }
+            )
+
+    # Clamp counts in case a set has fewer slots than counted (shouldn't happen)
+    for s in set_order:
+        set_index[s] = min(set_index[s], len(set_players[s]))
+
     current_set_idx = len(set_order)
     for i, s in enumerate(set_order):
         if set_index[s] < len(set_players[s]):
@@ -610,6 +647,7 @@ def _load_auction_from_db(auction_id: str) -> dict:
         "set_players": set_players,
         "set_index": set_index,
         "current_set_idx": current_set_idx,
+        "unsold_bucket": unsold_bucket,
         "results": [dict(r) for r in result_rows],
     }
 
@@ -629,8 +667,9 @@ def resume_auction(auction_id: str) -> None:
     st.session_state.set_index = snap["set_index"]
     st.session_state.current_set_idx = snap["current_set_idx"]
     st.session_state.bid = 0
-    # Reset transient state; resume starts clean
-    st.session_state.unsold_bucket = []
+    # Resume rebuilds the unsold pile from auction_players.unsold/released so
+    # main-phase parking decisions persist across refresh + restart.
+    st.session_state.unsold_bucket = list(snap.get("unsold_bucket") or [])
     st.session_state.last_sold = None
     st.session_state.current_sale_id = 0
     st.session_state.shown_sale_id = 0
@@ -2424,42 +2463,29 @@ elif st.session_state.page == "auction":
                     parentDoc.body.appendChild(canvas);
                     const myConfetti = confetti.create(canvas, { resize: true, useWorker: true });
                     const gold = ['#fde047','#facc15','#eab308','#fbbf24','#f59e0b','#d97706','#b45309'];
-                    // Short, punchy: all particles settle within ~2.5s
+                    // Short, punchy burst — settles in ~1.2s
                     myConfetti({
-                      particleCount: 140, spread: 150, startVelocity: 50,
-                      origin: { y: 0.45 }, colors: gold,
-                      shapes: ['square','circle'], scalar: 1.1,
-                      gravity: 1.1, ticks: 120,
+                      particleCount: 110, spread: 140, startVelocity: 48,
+                      origin: { y: 0.5 }, colors: gold,
+                      shapes: ['square','circle'], scalar: 1.0,
+                      gravity: 1.5, ticks: 80,
                     });
-                    setTimeout(function(){
-                      myConfetti({ particleCount: 50, angle: 60, spread: 70,
-                        origin: { x: 0, y: 0.75 }, colors: gold, gravity: 1.1, ticks: 110 });
-                      myConfetti({ particleCount: 50, angle: 120, spread: 70,
-                        origin: { x: 1, y: 0.75 }, colors: gold, gravity: 1.1, ticks: 110 });
-                    }, 220);
-
-                    // Watch the dialog; remove the canvas as soon as the modal closes
-                    const dlgSelector = 'div[role="dialog"], div[data-testid="stDialog"]';
-                    let modalWasOpen = !!parentDoc.querySelector(dlgSelector);
-                    const watchId = setInterval(function(){
-                      const open = !!parentDoc.querySelector(dlgSelector);
-                      if (modalWasOpen && !open) {
-                        canvas.remove();
-                        clearInterval(watchId);
-                      }
-                    }, 150);
-
-                    // Hard cap so the canvas never lingers
-                    setTimeout(function(){
-                      canvas.remove();
-                      clearInterval(watchId);
-                    }, 3500);
+                    // Hard cap so the canvas never lingers; the dialog being
+                    // blocked while Python sleeps means we're definitely past
+                    // the animation by the time Continue is hittable.
+                    setTimeout(function(){ canvas.remove(); }, 1300);
                   } catch(e) { console.error('confetti failed', e); }
                 })();
                 </script>
                 """,
                 height=0,
             )
+
+            # Block the rerun for ~1.2s so the Continue button doesn't appear
+            # (and thus the modal can't be dismissed) until the confetti has
+            # finished. The card + animation render before this sleep because
+            # st.markdown / _components.html flush before the next call.
+            _time.sleep(1.2)
 
             if st.button("Continue →", type="primary", use_container_width=True, key="dismiss_sold"):
                 st.rerun()
@@ -2766,9 +2792,22 @@ elif st.session_state.page == "auction":
                     phase=phase,
                 )
                 if phase == "main":
-                    # park for later
+                    # park for later — durable across reruns / refresh / resume
                     st.session_state.unsold_bucket.append(player)
-                # In unsold phase, _advance pops the head regardless — player is gone.
+                    enqueue(
+                        mark_player_unsold,
+                        st.session_state.auction_id,
+                        player["player_name"],
+                        True,
+                    )
+                else:
+                    # bucket → truly released: mark so resume doesn't bring them back
+                    enqueue(
+                        mark_player_released,
+                        st.session_state.auction_id,
+                        player["player_name"],
+                    )
+                # _advance pops bucket head in unsold phase, advances set_index in main phase
                 _advance(phase == "unsold", current_set)
                 st.session_state.bid = 0
                 st.session_state.current_bid_team = None

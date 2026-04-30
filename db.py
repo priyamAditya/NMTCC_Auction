@@ -105,11 +105,15 @@ CREATE TABLE IF NOT EXISTS auction_players (
     set_name TEXT,
     base_price INT NOT NULL,
     order_index INT,
-    is_captain BOOLEAN NOT NULL DEFAULT FALSE
+    is_captain BOOLEAN NOT NULL DEFAULT FALSE,
+    unsold BOOLEAN NOT NULL DEFAULT FALSE,
+    released BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS order_index INT;
 ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS is_captain BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS unsold BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE auction_players ADD COLUMN IF NOT EXISTS released BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS auction_results (
     id SERIAL PRIMARY KEY,
@@ -624,7 +628,7 @@ def get_auction_players_ordered(auction_id: str):
     with get_cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, set_name, base_price, order_index, is_captain
+            SELECT id, name, set_name, base_price, order_index, is_captain, unsold, released
             FROM auction_players
             WHERE auction_id = %s
             ORDER BY COALESCE(order_index, id)
@@ -632,6 +636,39 @@ def get_auction_players_ordered(auction_id: str):
             (auction_id,),
         )
         return cur.fetchall()
+
+
+def mark_player_unsold(auction_id: str, player_name: str, is_unsold: bool = True) -> None:
+    """Park (or un-park) a player in the unsold bucket. Persisted so a refresh
+    or a resume rebuilds the bucket faithfully."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE auction_players
+            SET unsold = %s
+            WHERE auction_id = %s
+              AND LOWER(name) = LOWER(%s)
+              AND is_captain = FALSE
+            """,
+            (bool(is_unsold), auction_id, player_name),
+        )
+
+
+def mark_player_released(auction_id: str, player_name: str) -> None:
+    """Player was popped from the unsold bucket without being sold. Marking
+    'released' keeps them out of the bucket on resume without unwinding the
+    unsold flag (which set_index uses to know main-phase advanced past them)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE auction_players
+            SET released = TRUE
+            WHERE auction_id = %s
+              AND LOWER(name) = LOWER(%s)
+              AND is_captain = FALSE
+            """,
+            (auction_id, player_name),
+        )
 
 
 def get_auction_results_detailed(auction_id: str):
